@@ -64,7 +64,7 @@ jobs:
         run: >-
           uv run pytest tests -m "not integration and not network" --timeout=60
           --cov=kael --cov-report=term --cov-report=xml --cov-fail-under=45
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && matrix.python-version == '3.12'
         with:
           name: coverage-report
