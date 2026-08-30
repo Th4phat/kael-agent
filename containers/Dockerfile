@@ -2,6 +2,8 @@ FROM kalilinux/kali-rolling:latest
 
 LABEL description="AI Agent Penetration Testing Environment with Comprehensive Automated Tools"
 
+ARG DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && \
     apt-get install -y kali-archive-keyring sudo && \
     apt-get update && \
@@ -12,8 +14,8 @@ RUN useradd -m -s /bin/bash pentester && \
     echo "pentester ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     touch /home/pentester/.hushlogin
 
-RUN mkdir -p /home/pentester/tools /app/certs && \
-    chown -R pentester:pentester /app/certs /home/pentester/tools
+RUN mkdir -p /home/pentester/tools && \
+    chown -R pentester:pentester /home/pentester/tools
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -29,7 +31,7 @@ RUN apt-get update && \
     iproute2 iputils-ping netcat-traditional \
     nmap ncat ndiff \
     sqlmap nuclei subfinder naabu ffuf \
-    nodejs npm pipx \
+    nodejs pipx \
     libcap2-bin \
     gdb \
     libnss3-tools \
@@ -38,29 +40,17 @@ RUN apt-get update && \
 
 RUN setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)
 
-USER pentester
-RUN openssl ecparam -name prime256v1 -genkey -noout -out /app/certs/ca.key && \
-    openssl req -x509 -new -key /app/certs/ca.key \
-    -out /app/certs/ca.crt \
-    -days 3650 \
-    -subj "/C=US/ST=CA/O=Security Testing/CN=Testing Root CA" \
-    -addext "basicConstraints=critical,CA:TRUE" \
-    -addext "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign" && \
-    openssl pkcs12 -export \
-    -out /app/certs/ca.p12 \
-    -inkey /app/certs/ca.key \
-    -in /app/certs/ca.crt \
-    -passout pass:"" \
-    -name "Testing Root CA" && \
-    chmod 644 /app/certs/ca.crt && \
-    chmod 600 /app/certs/ca.key && \
-    chmod 600 /app/certs/ca.p12
-
-USER root
-RUN cp /app/certs/ca.crt /usr/local/share/ca-certificates/ca.crt && \
-    update-ca-certificates
+# Create the shared application environment before any feature-specific
+# Python packages are installed. Keep it owned by the unprivileged runtime
+# user so later layers never need to install packages as root.
+RUN python3 -m venv /app/.venv && \
+    chown -R pentester:pentester /app/.venv
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+RUN curl -fsSL https://bun.sh/install | bash && \
+    mv /root/.bun/bin/bun /usr/local/bin/bun && \
+    ln -s /usr/local/bin/bun /usr/local/bin/bunx
 
 USER pentester
 WORKDIR /tmp
@@ -69,7 +59,8 @@ RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install -v github.com/projectdiscovery/katana/cmd/katana@latest && \
     go install -v github.com/projectdiscovery/cvemap/cmd/vulnx@latest && \
     go install -v github.com/jaeles-project/gospider@latest && \
-    go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
+    go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest && \
+    go clean -cache -modcache
 
 RUN nuclei -update-templates
 
@@ -78,21 +69,22 @@ RUN pipx install arjun && \
     pipx inject dirsearch 'setuptools<81' && \
     pipx install wafw00f
 
-ENV NPM_CONFIG_PREFIX=/home/pentester/.npm-global
-RUN mkdir -p /home/pentester/.npm-global
+ENV BUN_INSTALL=/home/pentester/.bun
+RUN mkdir -p /home/pentester/.bun/bin
 
-RUN npm install -g retire@latest && \
-    npm install -g eslint@latest && \
-    npm install -g js-beautify@latest && \
-    npm install -g @ast-grep/cli@latest && \
-    npm install -g tree-sitter-cli@latest && \
-    npm install -g agent-browser@0.26.0
+RUN bun install -g retire@5.3.0 && \
+    bun install -g eslint@10.4.1 && \
+    bun install -g js-beautify@1.15.4 && \
+    bun install -g @ast-grep/cli@0.38.7 && \
+    bun install -g tree-sitter-cli@0.26.8 && \
+    bun install -g --ignore-scripts agent-browser@0.27.3 && \
+    node /home/pentester/.bun/install/global/node_modules/agent-browser/scripts/postinstall.js
 
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV AGENT_BROWSER_USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 ENV AGENT_BROWSER_ARGS="--disable-blink-features=AutomationControlled,--no-first-run,--no-default-browser-check,--lang=en-US"
 ENV AGENT_BROWSER_SCREENSHOT_DIR=/workspace/.agent-browser-screenshots
-RUN /home/pentester/.npm-global/bin/agent-browser doctor --offline --quick
+RUN /home/pentester/.bun/bin/agent-browser doctor --offline --quick
 
 RUN set -eux; \
     TS_PARSER_DIR="/home/pentester/.tree-sitter/parsers"; \
@@ -149,40 +141,79 @@ RUN apt-get update && apt-get install -y zaproxy
 
 RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-RUN apt-get install -y wapiti
+RUN apt-get install -y wapiti mitmproxy
 
 USER pentester
 
 RUN pipx install semgrep && \
     pipx install bandit
 
-RUN npm install -g jshint
+RUN bun install -g jshint@2.13.6
 
 USER root
+
+# === REVERSE ENGINEERING TOOLCHAIN ===
+# Install RE tools (radare2 will be built from source)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bubblewrap \
+    iptables \
+    tcpdump \
+    strace \
+    ltrace \
+    binwalk \
+    foremost \
+    upx-ucl \
+    yara \
+    python3-yara \
+    ssdeep \
+    libfuzzy-dev \
+    exiftool \
+    file \
+    wine64 \
+    mono-runtime \
+    default-jdk-headless \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install radare2 from source
+RUN git clone --depth 1 https://github.com/radareorg/radare2 /tmp/radare2 && \
+    cd /tmp/radare2 && \
+    ./sys/install.sh --install --without-pull && \
+    cd / && \
+    rm -rf /tmp/radare2
+
+USER pentester
+RUN /app/.venv/bin/pip install --no-cache-dir 'setuptools<81' wheel six cffi && \
+    /app/.venv/bin/pip install --no-cache-dir --no-build-isolation \
+    'r2pipe>=1.9.4,<2' \
+    'scapy==2.7.0' \
+    'pefile==2024.8.26' \
+    'pyelftools==0.33' \
+    'ssdeep>=3.4,<4' \
+    'py-tlsh>=4.7.2,<5' \
+    'yara-python==4.5.4'
+USER root
+
+# Create directories for RE artifacts and rules
+RUN mkdir -p /opt/yara-rules/{malware_families,techniques,crypto,packers} \
+    /opt/kael-re \
+    && chown -R pentester:pentester /opt/kael-re
+
+# Copy YARA rules bundle
+COPY --chown=pentester:pentester kael/tools/re_sandbox/yara_rules/ /opt/yara-rules/
+
+# Copy RE runner script
+COPY --chmod=755 kael/tools/re_sandbox/re_runner.py /opt/kael-re/re_runner.py
 
 RUN apt-get autoremove -y && \
     apt-get autoclean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-ENV PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:/app/.venv/bin:$PATH"
+ENV PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.bun/bin:/app/.venv/bin:$PATH"
 ENV VIRTUAL_ENV="/app/.venv"
 
 WORKDIR /app
-
-ARG CAIDO_VERSION=0.56.0
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then \
-        CAIDO_ARCH="x86_64"; \
-    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
-        CAIDO_ARCH="aarch64"; \
-    else \
-        echo "Unsupported architecture: $ARCH" && exit 1; \
-    fi && \
-    wget -O caido-cli.tar.gz "https://caido.download/releases/v${CAIDO_VERSION}/caido-cli-v${CAIDO_VERSION}-linux-${CAIDO_ARCH}.tar.gz" && \
-    tar -xzf caido-cli.tar.gz && \
-    chmod +x caido-cli && \
-    rm caido-cli.tar.gz && \
-    mv caido-cli /usr/local/bin/
 
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
@@ -190,8 +221,8 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 RUN mkdir -p /workspace && chown -R pentester:pentester /workspace /app
 
 USER pentester
-RUN python3 -m venv /app/.venv && \
-    /app/.venv/bin/pip install --no-cache-dir caido-sdk-client && \
+RUN /app/.venv/bin/pip install --no-cache-dir \
+        'requests==2.32.5' && \
     /app/.venv/bin/pip install --no-cache-dir -r /home/pentester/tools/jwt_tool/requirements.txt && \
     printf '%s\n' \
         '#!/bin/bash' \
@@ -199,11 +230,14 @@ RUN python3 -m venv /app/.venv && \
         > /home/pentester/.local/bin/jwt_tool && \
     chmod +x /home/pentester/.local/bin/jwt_tool
 
-COPY --chown=pentester:pentester strix/tools/proxy/caido_api.py /opt/strix-python/caido_api.py
-ENV PYTHONPATH=/opt/strix-python
+COPY --chown=pentester:pentester kael/tools/proxy/mitm_addon.py /opt/kael-python/mitm_addon.py
+COPY --chown=pentester:pentester kael/tools/proxy/mitm_control.py /opt/kael-python/mitm_control.py
+COPY --chown=pentester:pentester kael/tools/proxy/sitemap.py /opt/kael-python/sitemap.py
+COPY --chown=pentester:pentester kael/tools/proxy/scope_store.py /opt/kael-python/scope_store.py
+ENV PYTHONPATH=/opt/kael-python
 
-RUN echo 'export PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:$PATH"' >> /home/pentester/.bashrc && \
-    echo 'export PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:$PATH"' >> /home/pentester/.profile
+RUN echo 'export PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.bun/bin:/app/.venv/bin:$PATH"' >> /home/pentester/.bashrc && \
+    echo 'export PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.bun/bin:/app/.venv/bin:$PATH"' >> /home/pentester/.profile
 
 USER root
 COPY containers/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

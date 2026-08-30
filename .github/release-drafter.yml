@@ -1,0 +1,35 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+
+version-resolver:
+  major:
+    labels: ["breaking"]
+  minor:
+    labels: ["feat", "feature", "enhancement"]
+  patch:
+    labels: ["fix", "bug", "bugfix", "docs", "chore", "dependencies", "ci"]
+  default: patch
+
+categories:
+  - title: "Breaking changes"
+    labels: ["breaking"]
+  - title: "Features"
+    labels: ["feat", "feature", "enhancement"]
+  - title: "Bug fixes"
+    labels: ["fix", "bug", "bugfix"]
+  - title: "Security"
+    labels: ["security"]
+  - title: "Documentation"
+    labels: ["docs", "documentation"]
+  - title: "Maintenance"
+    labels: ["chore", "refactor", "dependencies", "ci"]
+
+exclude-labels: ["skip-changelog"]
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+
+template: |
+  ## Changes
+
+  $CHANGES
+
+  **Full changelog**: https://github.com/th4phat/kael/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION

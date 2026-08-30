@@ -1,135 +1,91 @@
 ---
 title: "HTTP Proxy"
-description: "Caido-powered proxy for request interception and replay"
+description: "mitmproxy-based request capture, filtering, and replay"
 ---
 
-Strix includes [Caido](https://caido.io), a modern HTTP proxy built for security testing. All browser traffic flows through Caido, giving the agent full control over requests and responses.
+Kael starts an isolated [mitmproxy](https://mitmproxy.org/) sidecar in every
+sandbox session. Shell commands and the browser inherit `HTTP_PROXY` and
+`HTTPS_PROXY`, and the generated CA is installed in the sandbox's system and
+Chromium trust stores before the session is marked ready.
 
-## Capabilities
+## Agent tools
 
-| Feature          | Description                                  |
-| ---------------- | -------------------------------------------- |
-| Request Capture  | Log all HTTP/HTTPS traffic automatically     |
-| Request Replay   | Repeat any request with modifications        |
-| HTTPQL           | Query captured traffic with powerful filters |
-| Scope Management | Focus on specific domains or paths           |
-| Sitemap          | Visualize the discovered attack surface      |
+| Tool | Purpose |
+|---|---|
+| `list_requests()` | Filter and page through captured HTTP traffic |
+| `view_request()` | Inspect or search a raw request or response |
+| `repeat_request()` | Replay a captured request with modifications |
+| `list_sitemap()` | Browse the discovered host/path tree |
+| `view_sitemap_entry()` | Inspect a sitemap entry and related requests |
+| `scope_rules()` | Create and manage soft capture scopes |
 
-## HTTPQL Filtering
+## Filtering
 
-Query captured requests using Caido's HTTPQL syntax
+`list_requests` accepts a `mitm_filter` value using mitmproxy filter syntax.
+Common operators include:
 
-## Request Replay
+| Expression | Meaning |
+|---|---|
+| `~m POST` | POST requests |
+| `~d api\.example\.com` | Requests to one host |
+| `~u /api/` | URLs whose full value matches `/api/` |
+| `~c 5..` | Responses with a 5xx status |
+| `~hq Authorization` | Request headers containing `Authorization` |
+| `~bs "token|secret"` | Response bodies matching either word |
+| `!~u "\.(css|js|png)$"` | Exclude common static assets |
 
-The agent can take any captured request and replay it with modifications:
+Combine filters with `&`, `|`, `!`, and parentheses:
 
-- Change path parameters (test for IDOR)
-- Modify request body (test for injection)
-- Add/remove headers (test for auth bypass)
-- Alter cookies (test for session issues)
+```text
+~m POST & ~u /api/ & !~c 401
+```
 
-## Python Integration
+## Replay
 
-Proxy helpers are available to sandbox Python scripts through the image-baked `caido_api` module. This enables powerful scripted security testing:
+`repeat_request` accepts request overrides for `url`, `params`, `headers`,
+`body`, and `cookies`. A typical validation loop is:
+
+1. Generate traffic with the browser, `curl`, or a scanner.
+2. Locate the baseline with `list_requests`.
+3. Inspect it with `view_request`.
+4. Replay a controlled mutation with `repeat_request`.
+5. Compare status, headers, response length, body, and timing.
+
+## Python integration
+
+Prefer the first-class tools above during a normal scan. For batch logic in a
+sandbox Python script, import the image-baked `mitm_control` module:
 
 ```python
 import asyncio
 
-from caido_api import list_requests, repeat_request, view_request
+from mitm_control import list_flows, replay_flow
 
 
 async def main():
-    # List recent POST requests
-    post_requests = await list_requests(
-        httpql_filter='req.method.eq:"POST"',
-        first=20,
-    )
-
-    # View a specific request
-    request_details = await view_request("req_123", part="request")
-
-    # Replay with modified payload
-    response = await repeat_request(
-        "req_123",
-        modifications={"body": '{"user_id": "admin"}'},
-    )
-    print(response["status"], request_details is not None, len(post_requests.edges))
+    result = await list_flows(mitm_filter="~m POST & ~u /users/", first=20)
+    for entry in result["entries"]:
+        replay = await replay_flow(
+            entry["id"],
+            modifications={"headers": {"X-Testing": "kael"}},
+        )
+        print(entry["id"], replay["success"])
 
 
 asyncio.run(main())
 ```
 
-### Available Functions
+The module also exposes `view_flow`, `list_sitemap`, `view_sitemap_entry`, and
+`scope_rules`. All helpers are asynchronous and return dictionaries.
 
-| Function               | Description                                |
-| ---------------------- | ------------------------------------------ |
-| `list_requests()`      | Query captured traffic with HTTPQL filters |
-| `view_request()`       | Get full request/response details          |
-| `repeat_request()`     | Replay a request with modifications        |
-| `list_sitemap()`       | Browse the request-tree view of discovered surface |
-| `view_sitemap_entry()` | Inspect one sitemap entry + its related requests |
-| `scope_rules()`        | Manage proxy scope (allowlist/denylist)    |
+## Scope rules
 
-For one-off arbitrary requests, use shell tooling like `curl` — the
-sandbox's `HTTP_PROXY` env routes the traffic through Caido
-automatically, so it lands in `list_requests` and can be replayed via
-`repeat_request`.
+Scopes provide allowlist and denylist filtering for captured traffic:
 
-### Example: Automated IDOR Testing
-
-```python
-import asyncio
-
-# Get all requests to user endpoints
-from caido_api import list_requests, repeat_request
-
-
-async def main():
-    user_requests = await list_requests(httpql_filter='req.path.cont:"/users/"')
-
-    for edge in user_requests.edges:
-        req = edge.node.request
-        scheme = "https" if req.is_tls else "http"
-        for test_id in ["1", "2", "admin", "../admin"]:
-            url = f"{scheme}://{req.host}{req.path.replace('/users/1', f'/users/{test_id}')}"
-            response = await repeat_request(
-                req.id,
-                modifications={"url": url},
-            )
-            print(req.id, test_id, response["status"])
-            if response["status"] == "DONE":
-                print(f"Replay completed for candidate {test_id}")
-
-
-asyncio.run(main())
-```
-
-## Human-in-the-Loop
-
-Strix exposes the Caido proxy to your host machine, so you can interact with it alongside the automated scan. When the sandbox starts, the Caido URL is displayed in the TUI sidebar — click it to copy, then open it in Caido Desktop.
-
-### Accessing Caido
-
-1. Start a scan as usual
-2. Look for the **Caido** URL in the sidebar stats panel (e.g. `localhost:52341`)
-3. Open the URL in Caido Desktop
-4. Click **Continue as guest** to access the instance
-
-### What You Can Do
-
-- **Inspect traffic** — Browse all HTTP/HTTPS requests the agent is making in real time
-- **Replay requests** — Take any captured request and resend it with your own modifications
-- **Intercept and modify** — Pause requests mid-flight, edit them, then forward
-- **Explore the sitemap** — See the full attack surface the agent has discovered
-- **Manual testing** — Use Caido's tools to test findings the agent reports, or explore areas it hasn't reached
-
-This turns Strix from a fully automated scanner into a collaborative tool — the agent handles the heavy lifting while you focus on the interesting parts.
-
-## Scope
-
-Create scopes to filter traffic to relevant domains:
-
-```
+```text
 Allowlist: ["api.example.com", "*.example.com"]
 Denylist: ["*.gif", "*.jpg", "*.png", "*.css", "*.js"]
 ```
+
+Scope rules help reduce noise; they do not authorize a target or replace
+network-level egress restrictions.

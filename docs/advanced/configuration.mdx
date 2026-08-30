@@ -1,126 +1,117 @@
 ---
 title: "Configuration"
-description: "Environment variables for Strix"
+description: "Supported environment variables and config-file precedence"
 ---
 
-Configure Strix using environment variables or a config file.
+Kael resolves configuration in this order, from highest to lowest priority:
 
-## LLM Configuration
+1. Process environment variables
+2. A `.env` file in the current working directory
+3. The selected JSON config file
+4. Built-in defaults
 
-<ParamField path="STRIX_LLM" type="string" required>
-  Model name in LiteLLM format (e.g., `openai/gpt-5.4`, `anthropic/claude-sonnet-4-6`).
-</ParamField>
-
-<ParamField path="LLM_API_KEY" type="string">
-  API key for your LLM provider. Not required for local models or cloud provider auth (Vertex AI, AWS Bedrock).
-</ParamField>
-
-<ParamField path="LLM_API_BASE" type="string">
-  Custom API base URL. Also accepts `OPENAI_API_BASE`, `LITELLM_BASE_URL`, or `OLLAMA_API_BASE`.
-</ParamField>
-
-<ParamField path="LLM_TIMEOUT" default="300" type="integer">
-  Request timeout in seconds for LLM calls.
-</ParamField>
-
-<ParamField path="STRIX_LLM_MAX_RETRIES" default="5" type="integer">
-  Maximum number of retries for LLM API calls on transient failures.
-</ParamField>
-
-<ParamField path="STRIX_REASONING_EFFORT" default="high" type="string">
-  Control thinking effort for reasoning models. Valid values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. Defaults to `medium` for quick scan mode.
-</ParamField>
-
-<ParamField path="STRIX_MEMORY_COMPRESSOR_TIMEOUT" default="30" type="integer">
-  Timeout in seconds for memory compression operations (context summarization).
-</ParamField>
-
-## Optional Features
-
-<ParamField path="PERPLEXITY_API_KEY" type="string">
-  API key for Perplexity AI. Enables real-time web search during scans for OSINT and vulnerability research.
-</ParamField>
-
-<ParamField path="STRIX_TELEMETRY" default="1" type="string">
-  Telemetry toggle. Set to `0`, `false`, `no`, or `off` to disable telemetry (PostHog, Scarf, OTEL).
-</ParamField>
-
-<ParamField path="TRACELOOP_BASE_URL" type="string">
-  OTLP/Traceloop base URL for remote OpenTelemetry export. If unset, Strix keeps traces local only.
-</ParamField>
-
-<ParamField path="TRACELOOP_API_KEY" type="string">
-  API key used for remote trace export. Remote export is enabled only when both `TRACELOOP_BASE_URL` and `TRACELOOP_API_KEY` are set.
-</ParamField>
-
-<ParamField path="TRACELOOP_HEADERS" type="string">
-  Optional custom OTEL headers (JSON object or `key=value,key2=value2`). Useful for Langfuse or custom/self-hosted OTLP gateways.
-</ParamField>
-
-When remote OTEL vars are not set, Strix still writes complete run telemetry locally to:
+The default JSON path is `~/.kael/cli-config.json`. Select another file with
+the positional `config` keyword:
 
 ```bash
-strix_runs/<run_name>/events.jsonl
+kael ./app config /path/to/config.json
 ```
 
-When remote vars are set, Strix dual-writes telemetry to both local JSONL and the remote OTEL endpoint.
+Provider-specific authentication variables such as `AZURE_API_KEY`, AWS
+credentials, and Google Application Default Credentials are consumed by
+LiteLLM; see the corresponding provider guide.
 
-## Docker Configuration
+## LLM
 
-<ParamField path="STRIX_IMAGE" default="ghcr.io/usestrix/strix-sandbox:1.0.0" type="string">
-  Docker image to use for the sandbox container.
-</ParamField>
+| Variable | Default | Purpose |
+|---|---:|---|
+| `KAEL_LLM` | — | LiteLLM provider/model identifier, such as `openai/gpt-5.4` |
+| `LLM_API_KEY` | — | Main provider credential; `OPENAI_API_KEY` is also accepted |
+| `LLM_API_BASE` | — | Custom provider endpoint |
+| `KAEL_REASONING_EFFORT` | `high` | `none`, `minimal`, `low`, `medium`, `high`, or `xhigh` |
+| `LLM_TIMEOUT` | `300` | LLM request timeout in seconds |
+| `KAEL_OPENROUTER_PROVIDER` | — | OpenRouter provider-routing preferences as a JSON object |
+| `KAEL_VISION_LLM` | — | Optional dedicated vision-model identifier |
+| `VISION_LLM_API_KEY` | Main key | Credential for the dedicated vision model |
+| `VISION_LLM_API_BASE` | Main base URL | Endpoint for the dedicated vision model |
 
-<ParamField path="DOCKER_HOST" type="string">
-  Docker daemon socket path. Use for remote Docker hosts or custom configurations.
-</ParamField>
+`OPENAI_API_BASE`, `OPENAI_BASE_URL`, `LITELLM_BASE_URL`, and
+`OLLAMA_API_BASE` are accepted aliases for `LLM_API_BASE`.
 
-<ParamField path="STRIX_RUNTIME_BACKEND" default="docker" type="string">
-  Runtime backend for the sandbox environment.
-</ParamField>
+## Container runtime
 
-## Sandbox Configuration
+| Variable | Default | Purpose |
+|---|---:|---|
+| `KAEL_IMAGE` | `kael-sandbox:0.1.0` | Sandbox image tag |
+| `KAEL_RUNTIME_BACKEND` | `docker` | Runtime CLI: `docker` or `podman` |
+| `KAEL_AUTO_BUILD_SANDBOX` | `false` | Permit a missing default image to be built in non-interactive runs |
+| `KAEL_CONTAINER_SOCKET` | Runtime default | Filesystem path to a Docker-compatible API socket |
 
-<ParamField path="STRIX_SANDBOX_EXECUTION_TIMEOUT" default="120" type="integer">
-  Maximum execution time in seconds for sandbox operations.
-</ParamField>
+Kael source-builds only its versioned default image. A missing custom image is
+pulled by the selected runtime.
 
-<ParamField path="STRIX_SANDBOX_CONNECT_TIMEOUT" default="10" type="integer">
-  Timeout in seconds for connecting to the sandbox container.
-</ParamField>
-
-## Config File
-
-Strix stores configuration in `~/.strix/cli-config.json`. You can also specify a custom config file:
+For rootless Podman:
 
 ```bash
-strix --target ./app --config /path/to/config.json
+export KAEL_RUNTIME_BACKEND=podman
+export KAEL_CONTAINER_SOCKET="/run/user/$(id -u)/podman/podman.sock"
+systemctl --user start podman.socket
 ```
 
-**Config file format:**
+Rootful Podman defaults to `/run/podman/podman.sock`. Docker uses the standard
+Docker environment and socket when `KAEL_CONTAINER_SOCKET` is unset.
+
+## Search integrations
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `PERPLEXITY_API_KEY` | — | Enable Perplexity-backed web search |
+| `TAVILY_API_KEY` | — | Enable Tavily-backed exploit search |
+| `TAVILY_SEARCH_DEPTH` | `advanced` | `basic` or `advanced` |
+| `TAVILY_MAX_RESULTS` | `10` | Maximum Tavily results |
+| `TAVILY_INCLUDE_ANSWER` | `true` | Ask Tavily for a synthesized answer |
+| `EXPLOITDB_MAX_RESULTS` | `15` | Maximum Exploit-DB results |
+| `EXPLOITDB_TIMEOUT` | `60` | Exploit-DB timeout in seconds |
+
+## Memory and tool loop
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `KAEL_MEMORY_LEARNING_TTL_DAYS` | `90` | Learning retention; `0` disables expiry |
+| `KAEL_MEMORY_MAX_LEARNINGS_PER_TARGET` | `500` | Per-target learning cap |
+| `KAEL_PARALLEL_TOOL_CALLS` | `off` | `off`, `safe`, or `all` |
+| `KAEL_TOOL_RESULT_MAX_CHARS` | `20000` | Soft size cap for one tool result |
+| `KAEL_DEDUP_WINDOW_TURNS` | `1` | Window used to warn about repeated tool calls |
+
+## Malware reverse engineering
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `KAEL_RE_ANALYSIS_MODE` | `both` | `static`, `dynamic`, or `both` |
+| `KAEL_RE_MAX_RUNTIME_SEC` | `120` | Maximum duration of one detonation |
+| `KAEL_RE_NETWORK_MODE` | `controlled` | `off`, `controlled`, or `live` |
+| `KAEL_RE_BLOCKED_CIDRS` | `["169.254.169.254/32"]` | JSON array of CIDRs blocked in controlled mode |
+| `KAEL_RE_YARA_RULES_DIR` | — | Directory containing additional YARA rules |
+| `KAEL_RE_ENABLE_MEMORY_DUMPS` | `true` | Allow memory dumps during detonation |
+
+<Warning>
+`live` malware networking permits unrestricted outbound traffic from the
+sandbox. Use it only in a controlled lab with explicit authorization.
+</Warning>
+
+## JSON format
 
 ```json
 {
   "env": {
-    "STRIX_LLM": "openai/gpt-5.4",
+    "KAEL_LLM": "openai/gpt-5.4",
     "LLM_API_KEY": "sk-...",
-    "STRIX_REASONING_EFFORT": "high"
+    "KAEL_REASONING_EFFORT": "high",
+    "KAEL_RUNTIME_BACKEND": "podman"
   }
 }
 ```
 
-## Example Setup
-
-```bash
-# Required
-export STRIX_LLM="openai/gpt-5.4"
-export LLM_API_KEY="sk-..."
-
-# Optional: Enable web search
-export PERPLEXITY_API_KEY="pplx-..."
-
-# Optional: Custom timeouts
-export LLM_TIMEOUT="600"
-export STRIX_SANDBOX_EXECUTION_TIMEOUT="300"
-
-```
+Keep credentials out of version control. Kael writes local run events and
+reports under `kael_runs/`; no remote telemetry endpoint is configured by
+these settings.

@@ -1,0 +1,19 @@
+# CODEOWNERS
+# Each line is a file pattern followed by one or more owners.
+# Order matters: the last matching rule wins.
+
+# Default owners for everything not matched below.
+*       @th4phat
+
+# Core agent, runtime, and security-sensitive code needs a maintainer review.
+/kael/core/                @th4phat
+/kael/agents/              @th4phat
+/kael/runtime/             @th4phat
+/kael/tools/proxy/         @th4phat
+/kael/config/              @th4phat
+/kael/report/              @th4phat
+/containers/               @th4phat
+/scripts/                  @th4phat
+/.github/workflows/        @th4phat
+/pyproject.toml            @th4phat
+/Makefile                  @th4phat

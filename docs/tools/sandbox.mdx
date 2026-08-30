@@ -1,9 +1,11 @@
 ---
 title: "Sandbox Tools"
-description: "Pre-installed security tools in the Strix container"
+description: "Pre-installed security tools in the Kael container"
 ---
 
-Strix runs inside a Kali Linux-based Docker container with a comprehensive set of security tools pre-installed. The agent can use any of these tools through the [terminal](/tools/terminal).
+Kael runs inside a Kali Linux-based container managed by Docker or Podman, with
+a comprehensive set of security tools pre-installed. The agent can use these
+tools through the [terminal](/tools/terminal).
 
 ## Reconnaissance
 
@@ -78,13 +80,13 @@ Strix runs inside a Kali Linux-based Docker container with a comprehensive set o
 
 | Tool                      | Description                                   |
 | ------------------------- | --------------------------------------------- |
-| [Caido](https://caido.io) | Modern HTTP proxy for interception and replay |
+| [mitmproxy](https://mitmproxy.org) | HTTP/HTTPS interception and replay |
 
 ## Browser
 
 | Tool                                 | Description                 |
 | ------------------------------------ | --------------------------- |
-| [Playwright](https://playwright.dev) | Headless browser automation |
+| [Agent Browser](https://github.com/vercel-labs/agent-browser) | Chromium automation through a shell CLI |
 
 <Note>
   All tools are pre-configured and ready to use. The agent selects the appropriate tool based on the vulnerability being tested.

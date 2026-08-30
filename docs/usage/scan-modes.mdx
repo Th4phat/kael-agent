@@ -3,12 +3,12 @@ title: "Scan Modes"
 description: "Choose the right scan depth for your use case"
 ---
 
-Strix offers three scan modes to balance speed and thoroughness.
+Kael offers five scan modes for different assessment types and depths.
 
 ## Quick
 
 ```bash
-strix --target ./app --scan-mode quick
+kael ./app mode quick
 ```
 
 Fast checks for obvious vulnerabilities. Best for:
@@ -21,7 +21,7 @@ Fast checks for obvious vulnerabilities. Best for:
 ## Standard
 
 ```bash
-strix --target ./app --scan-mode standard
+kael ./app mode standard
 ```
 
 Balanced testing for routine security reviews. Best for:
@@ -36,7 +36,7 @@ Balanced testing for routine security reviews. Best for:
 ## Deep
 
 ```bash
-strix --target ./app --scan-mode deep
+kael ./app mode deep
 ```
 
 Thorough penetration testing. Best for:
@@ -52,6 +52,25 @@ Thorough penetration testing. Best for:
 Deep mode is the default. It explores edge cases, chained vulnerabilities, and complex attack paths.
 </Note>
 
+## Malware Reverse Engineering
+
+```bash
+kael ./sample.exe mode malware_re
+```
+
+Static and controlled dynamic analysis for suspicious binaries. Use only with
+samples you are authorized to analyze and review the reverse-engineering
+network controls in [Configuration](/advanced/configuration).
+
+## CTF
+
+```bash
+kael ./challenge-folder mode ctf
+```
+
+Challenge-oriented workflows for cryptography, forensics, OSINT, pwn, and
+reverse-engineering tasks.
+
 ## Choosing a Mode
 
 | Scenario | Recommended Mode |
@@ -60,3 +79,5 @@ Deep mode is the default. It explores edge cases, chained vulnerabilities, and c
 | Weekly scans | Standard |
 | Before major release | Deep |
 | Bug bounty hunting | Deep |
+| Suspicious binary | Malware RE |
+| Capture-the-flag challenge | CTF |

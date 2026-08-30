@@ -1,0 +1,29 @@
+name: Sandbox integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    name: Build sandbox and run integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - name: Build the versioned local sandbox
+        run: uv run kael sandbox build
+      - name: Run Docker-dependent tests
+        run: make test-integration
+        env:
+          KAEL_RUNTIME_BACKEND: docker

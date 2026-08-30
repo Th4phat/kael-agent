@@ -1,70 +1,86 @@
-.PHONY: help install dev-install format lint type-check security check-all clean pre-commit setup-dev dev
+.PHONY: help install setup-dev format fix lint type-check security check test \
+	test-unit test-integration test-network test-cov package-check sandbox-build \
+	pre-commit clean
 
 help:
-	@echo "Available commands:"
-	@echo "  setup-dev     - Install all development dependencies and setup pre-commit"
-	@echo "  install       - Install production dependencies"
-	@echo "  dev-install   - Install development dependencies"
+	@echo "Setup:"
+	@echo "  install          Install locked runtime dependencies"
+	@echo "  setup-dev        Install locked development dependencies and hooks"
 	@echo ""
-	@echo "Code Quality:"
-	@echo "  format        - Format code with ruff"
-	@echo "  lint          - Lint code with ruff"
-	@echo "  type-check    - Run type checking with mypy and pyright"
-	@echo "  security      - Run security checks with bandit"
-	@echo "  check-all     - Run all code quality checks"
+	@echo "Validation and packaging:"
+	@echo "  check            Run the local source-release gate"
+	@echo "  lint             Check Ruff formatting and lint"
+	@echo "  type-check       Run the incremental strict mypy gate"
+	@echo "  security         Run medium/high-confidence Bandit checks"
+	@echo "  package-check    Build wheel and sdist"
 	@echo ""
-	@echo "Development:"
-	@echo "  pre-commit    - Run pre-commit hooks on all files"
-	@echo "  clean         - Clean up cache files and artifacts"
+	@echo "Tests:"
+	@echo "  test-unit        Offline unit suite"
+	@echo "  test-integration Container-runtime-dependent suite"
+	@echo "  test-network     Live external-service suite"
+	@echo "  test-cov         Offline coverage report"
+	@echo ""
+	@echo "Mutating developer helpers:"
+	@echo "  format           Rewrite Python formatting"
+	@echo "  fix              Apply safe Ruff fixes"
+	@echo "  sandbox-build    Build the versioned local sandbox"
 
 install:
-	uv sync --no-dev
+	uv sync --frozen --no-dev
 
-dev-install:
-	uv sync
-
-setup-dev: dev-install
+setup-dev:
+	uv sync --frozen
 	uv run pre-commit install
-	@echo "✅ Development environment setup complete!"
-	@echo "Run 'make check-all' to verify everything works correctly."
 
 format:
-	@echo "🎨 Formatting code with ruff..."
-	uv run ruff format .
-	@echo "✅ Code formatting complete!"
+	uv run ruff format kael tests
+
+fix:
+	uv run ruff check kael tests --fix
 
 lint:
-	@echo "🔍 Linting code with ruff..."
-	uv run ruff check . --fix
-	@echo "✅ Linting complete!"
+	uv run ruff format --check kael tests
+	uv run ruff check kael tests
 
 type-check:
-	@echo "🔍 Type checking with mypy..."
-	uv run mypy strix/
-	@echo "🔍 Type checking with pyright..."
-	uv run pyright strix/
-	@echo "✅ Type checking complete!"
+	uv run mypy kael
 
 security:
-	@echo "🔒 Running security checks with bandit..."
-	uv run bandit -r strix/ -c pyproject.toml
-	@echo "✅ Security checks complete!"
+	uv run bandit -r kael -c pyproject.toml -q -ll -ii
 
-check-all: format lint type-check security
-	@echo "✅ All code quality checks passed!"
+test: test-unit
+
+test-unit:
+	uv run pytest tests -m "not integration and not network" --timeout=60
+
+test-integration:
+	uv run pytest tests -m integration --timeout=300
+
+test-network:
+	uv run pytest tests -m network --timeout=180
+
+test-cov:
+	uv run pytest tests -m "not integration and not network" --timeout=60 \
+		--cov=kael --cov-report=term-missing --cov-report=html --cov-fail-under=45
+
+package-check:
+	uv build
+
+check:
+	uv lock --check
+	$(MAKE) lint
+	$(MAKE) type-check
+	$(MAKE) security
+	$(MAKE) test-unit
+	$(MAKE) package-check
+
+sandbox-build:
+	uv run kael sandbox build
 
 pre-commit:
-	@echo "🔧 Running pre-commit hooks..."
 	uv run pre-commit run --all-files
-	@echo "✅ Pre-commit hooks complete!"
 
 clean:
-	@echo "🧹 Cleaning up cache files..."
-	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name ".mypy_cache" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
-	find . -name "*.pyc" -delete 2>/dev/null || true
-	@echo "✅ Cleanup complete!"
-
-dev: format lint type-check
-	@echo "✅ Development cycle complete!"
+	find kael tests -type d -name "__pycache__" -prune -exec rm -rf {} +
+	find kael tests -name "*.pyc" -delete
+	rm -rf build dist htmlcov coverage.xml

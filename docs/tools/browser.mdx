@@ -1,13 +1,16 @@
 ---
 title: "Browser"
-description: "Playwright-powered Chrome for web application testing"
+description: "Agent Browser and Chromium for web application testing"
 ---
 
-Strix uses a headless Chrome browser via Playwright to interact with web applications exactly like a real user would.
+Kael uses the `agent-browser` shell CLI with a sandboxed Chromium instance to
+interact with web applications. Agents navigate through accessibility-tree
+snapshots and stable element references instead of parsing full HTML pages.
 
 ## How It Works
 
-All browser traffic is automatically routed through the Caido proxy, giving Strix full visibility into every request and response. This enables:
+Browser traffic is routed through the session's mitmproxy sidecar, allowing
+Kael to inspect and replay requests. This enables:
 
 - Testing client-side vulnerabilities (XSS, DOM manipulation)
 - Navigating authenticated flows (login, OAuth, MFA)

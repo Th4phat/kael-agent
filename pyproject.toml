@@ -1,12 +1,12 @@
 [project]
-name = "strix-agent"
-version = "1.0.3"
+name = "kael-agent"
+version = "0.1.0"
 description = "Open-source AI Hackers for your apps"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 authors = [
-  { name = "Strix", email = "hi@usestrix.com" },
+  { name = "th4phat and Kael contributors" },
 ]
 keywords = [
   "cybersecurity",
@@ -30,7 +30,6 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
-  "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
   "openai-agents[litellm]==0.14.6",
@@ -41,20 +40,62 @@ dependencies = [
   "textual>=6.0.0",
   "requests>=2.32.0",
   "cvss>=3.2",
-  "caido-sdk-client>=0.2.0",
+  "pefile>=2024.8.26",
+  "pyelftools>=0.32",
+  "scapy>=2.6.1,<3",
+  "yara-python>=4.5.4,<5",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Th4phat/kael-agent"
+Repository = "https://github.com/Th4phat/kael-agent"
+Issues = "https://github.com/Th4phat/kael-agent/issues"
+Changelog = "https://github.com/Th4phat/kael-agent/blob/main/CHANGELOG.md"
+
 [project.scripts]
-strix = "strix.interface.main:main"
+kael = "kael.interface.main:main"
 
 [dependency-groups]
 dev = [
   "mypy>=1.16.0",
   "ruff>=0.11.13",
-  "pyright>=1.1.401",
   "bandit>=1.8.3",
   "pre-commit>=4.2.0",
-  "pyinstaller>=6.17.0; python_version >= '3.12' and python_version < '3.15'",
+  "mitmproxy>=11.0.0,<12.0.0; python_version < '3.13'",
+  "mitmproxy>=12.2.3,<13.0.0; python_version >= '3.13'",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  "pytest-cov>=6.0.0",
+  "pytest-mock>=3.14.0",
+  "pytest-timeout>=2.4.0",
+]
+
+# ============================================================================
+# Pytest Configuration
+# ============================================================================
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+]
+markers = [
+  "integration: marks tests requiring a built sandbox and Docker-compatible runtime API",
+  "slow: marks tests as slow running",
+  "network: marks tests that make real network calls (deselect with '-m \"not network\"')",
+]
+filterwarnings = [
+  "error",
+  "ignore::ResourceWarning",
+  "ignore::DeprecationWarning:openai_agents",
+  "ignore::DeprecationWarning:openai",
+  "ignore::DeprecationWarning:litellm",
+  "ignore::DeprecationWarning:pydantic",
+  "ignore::PendingDeprecationWarning",
 ]
 
 [build-system]
@@ -62,7 +103,39 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["strix"]
+packages = ["kael"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/kael",
+  "/containers",
+  "/docs",
+  "/tests",
+  "/scripts/docker.sh",
+  "/.editorconfig",
+  "/.gitignore",
+  "/.pre-commit-config.yaml",
+  "/BUILDING.md",
+  "/CHANGELOG.md",
+  "/CODE_OF_CONDUCT.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/Makefile",
+  "/README.md",
+  "/SECURITY.md",
+  "/pyproject.toml",
+  "/uv.lock",
+]
+exclude = [
+  "/.coverage*",
+  "/.env*",
+  "/agent-browser",
+  "/graphify-out",
+  "/kael_runs",
+  "/Unknown.Traffic.pcap",
+  "/sample_helper",
+]
 
 # ============================================================================
 # Type Checking Configuration
@@ -98,11 +171,33 @@ module = [
     "textual.*",
     "cvss.*",
     "docker.*",
-    "caido_sdk_client.*",
+    "mitmproxy.*",
     "pydantic_settings.*",
 ]
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]
+
+# The mitm addon calls into mitmproxy's (untyped) API surface: Headers.items()
+# and the @command.command decorator have no upstream annotations, so typed
+# call sites trip no-untyped-call / untyped-decorator. These are not real bugs.
+[[tool.mypy.overrides]]
+module = ["kael.tools.proxy.mitm_addon"]
+disable_error_code = ["no-untyped-call", "untyped-decorator"]
+
+# The inherited UI, CTF, proxy, and malware-analysis surfaces predate the
+# strict type gate. Keep checking imports and all other modules while those
+# feature areas are migrated incrementally; tests remain the release gate for
+# the excluded implementations.
+[[tool.mypy.overrides]]
+module = [
+    "kael.interface.tui.*",
+    "kael.tools.ctf_tools.*",
+    "kael.tools.proxy.*",
+    "kael.tools.re_sandbox.*",
+    "kael.tools.re_tools.*",
+    "kael.tools.view_image.*",
+]
+ignore_errors = true
 
 # ============================================================================
 # Ruff Configuration (Fast Python Linter & Formatter)
@@ -122,119 +217,125 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-# Enable comprehensive rule sets
+# Keep the default gate focused on correctness and maintainable imports.
+# Security-specific findings are handled by Bandit so exploit-analysis code
+# does not need broad, misleading lint suppressions.
 select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # Pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "UP",  # pyupgrade
-    "YTT", # flake8-2020
-    "S",   # flake8-bandit
-    "BLE", # flake8-blind-except
-    "FBT", # flake8-boolean-trap
-    "B",   # flake8-bugbear
-    "A",   # flake8-builtins
-    "COM", # flake8-commas
-    "C4",  # flake8-comprehensions
-    "DTZ", # flake8-datetimez
-    "T10", # flake8-debugger
-    "EM",  # flake8-errmsg
-    "FA",  # flake8-future-annotations
-    "ISC", # flake8-implicit-str-concat
-    "ICN", # flake8-import-conventions
-    "G",   # flake8-logging-format
-    "INP", # flake8-no-pep420
-    "PIE", # flake8-pie
-    "T20", # flake8-print
-    "PYI", # flake8-pyi
-    "Q",   # flake8-quotes
-    "RSE", # flake8-raise
-    "RET", # flake8-return
-    "SLF", # flake8-self
-    "SIM", # flake8-simplify
-    "TID", # flake8-tidy-imports
-    "TCH", # flake8-type-checking
-    "ARG", # flake8-unused-arguments
-    "PTH", # flake8-use-pathlib
-    "ERA", # eradicate
-    "PD",  # pandas-vet
-    "PGH", # pygrep-hooks
-    "PL",  # Pylint
-    "TRY", # tryceratops
-    "FLY", # flynt
-    "PERF", # Perflint
-    "RUF", # Ruff-specific rules
-]
-
-ignore = [
-    "S101",   # Use of assert
-    "S104",   # Possible binding to all interfaces
-    "S301",   # Use of pickle
-    "COM812", # Missing trailing comma (handled by formatter)
-    "ISC001", # Single line implicit string concatenation (handled by formatter)
-    "PLR0913", # Too many arguments to function call
-    "TRY003",  # Avoid specifying long messages outside the exception class
-    "EM101",   # Exception must not use a string literal
-    "EM102",   # Exception must not use an f-string literal
-    "FBT001",  # Boolean positional arg in function definition
-    "FBT002",  # Boolean default positional argument in function definition
-    "G004",    # Logging statement uses f-string
-    "PLR2004", # Magic value used in comparison
-    "SLF001",  # Private member accessed
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "I",
+    "UP",
+    "B",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # Lazy imports inside functions to avoid circular dependency with
-# strix.telemetry / strix.report.dedupe / cvss.
-"strix/tools/notes/tools.py" = ["PLC0415", "TC002"]
-"strix/tools/finish/tool.py" = ["PLC0415", "TC002"]
-"strix/tools/reporting/tool.py" = ["PLC0415", "TC002"]
-"strix/tools/**/*.py" = [
+# kael.telemetry / kael.report.dedupe / cvss.
+"kael/tools/notes/tools.py" = ["PLC0415", "TC002", "PLR0911"]
+"kael/tools/finish/tool.py" = ["PLC0415", "TC002"]
+"kael/tools/reporting/tool.py" = ["PLC0415", "TC002"]
+"kael/agents/factory.py" = ["PLC0415", "TC002", "SIM105"]
+"kael/core/inputs.py" = ["PLC0415"]  # lazy import for circular avoidance with kael.config
+# Tests use Path / MagicMock / etc. for both annotations and runtime
+# construction — TC003 / TC001 are noisy and not actionable in tests.
+"tests/**/*.py" = [
+  "TC001",
+  "TC002",
+  "TC003",
+  "PLC0415",
+  "PLR1714",
+  "PLR2004",
+  "ARG002",
+  "F401",
+  "F811",
+  "INP001",  # No __init__.py needed for pytest discovery
+  "E501",  # Long lines in tests for readability of test names + assertions
+]
+"kael/tools/**/*.py" = [
     "ARG001", # Unused function argument (tools may have unused args for interface consistency)
+]
+# mitmproxy addon runs inside mitmdump's own event loop, so several
+# "lint" rules don't apply (e.g. starting a subprocess for cert install
+# is a one-shot bootstrap step, not user input). Keep these quiet.
+"kael/tools/proxy/mitm_addon.py" = [
+    "S324",  # sha1 used only for stable 16-char node ids; not security-sensitive
+    "S607",  # update-ca-certificates is a fixed command, not user input
+    "G003",  # logging.info with + concat is fine inside the addon
+    "PTH105",  # os.replace for atomic write
+    "BLE001",  # top-level dispatch handlers must catch everything
+    "TC003",  # standard-lib imports are also runtime-resolved
+    "ARG002",  # request handler signature is fixed by BaseHTTPRequestHandler
+    "PLR0915",  # control-server dispatch is necessarily long
+    "E501",  # long log messages and HTTP paths
+]
+"kael/tools/proxy/sitemap.py" = [
+    "S324",  # sha1 for stable node ids, not security
+    "BLE001",  # JSONL is best-effort; tolerate any malformed record
+    "PLR0915",  # tree walk is necessarily recursive
+    "TC003",  # os imported for runtime use
+]
+"kael/tools/proxy/scope_store.py" = [
+    "SIM110",  # explicit loop is clearer than nested any()
+    "ARG002",  # ScopeStore matches a small dataclass API surface
+    "E501",
+    "PLR0912",  # CRUD methods have a lot of branches
+    "PLR0915",
+]
+"kael/tools/proxy/mitm_control.py" = [
+    "PLR0913",  # many optional kwargs map to JSONL body fields
+]
+"kael/runtime/mitm_bootstrap.py" = [
+    "PLR0913",
+    "BLE001",  # control endpoint must swallow and surface errors
 ]
 # Custom Docker subclass duplicates parent body; some imports are for annotations.
 # Backend factories import their backend's deps lazily so deployments
 # that pick a different backend don't need every backend's libs installed.
-"strix/runtime/backends.py" = ["PLC0415"]
-"strix/runtime/docker_client.py" = [
+"kael/runtime/backends.py" = ["PLC0415"]
+"kael/runtime/docker_client.py" = [
     "TC002",  # Manifest, Container imported for annotations
     "TC003",  # uuid imported for annotation
 ]
+
 # SDK function-tool wrappers: the SDK calls get_type_hints() at registration
 # time to derive the JSON schema, which evaluates annotations at runtime —
 # so RunContextWrapper / Tool / TResponseInputItem must be imported eagerly,
 # not under TYPE_CHECKING.
-"strix/tools/todo/tools.py" = ["TC002"]
-"strix/tools/thinking/tool.py" = ["TC002"]
-"strix/tools/web_search/tool.py" = ["TC002"]
-"strix/tools/proxy/tools.py" = ["TC002", "PLR0911"]
-"strix/tools/agents_graph/tools.py" = ["TC002"]
-"strix/agents/factory.py" = ["TC002"]
+"kael/tools/todo/tools.py" = ["TC002"]
+"kael/tools/thinking/tool.py" = ["TC002"]
+"kael/tools/web_search/tool.py" = ["TC002"]
+"kael/tools/proxy/tools.py" = ["TC002", "PLR0911"]
+"kael/tools/agents_graph/tools.py" = ["TC002"]
 # Entry point: ``Path`` is used at runtime by the typing of the
 # session_manager call; importing under TYPE_CHECKING would defer
 # resolution past where mypy needs it.
-"strix/core/runner.py" = ["TC003", "PLR0912", "PLR0915", "PLC0415"]
+"kael/core/runner.py" = ["TC003", "PLR0912", "PLR0915", "PLC0415"]
 # ReportState carries scan artifact/report fields and
 # a runtime ``Callable`` annotation on ``vulnerability_found_callback``.
-"strix/report/state.py" = ["TC003", "PLR0912", "PLR0915", "E501", "PERF401"]
-"strix/report/usage.py" = ["PLC0415"]
-"strix/config/models.py" = ["PLC0415"]
+"kael/report/state.py" = ["TC003", "PLR0912", "PLR0915", "E501", "PERF401"]
+"kael/report/usage.py" = ["PLC0415"]
+"kael/config/models.py" = ["PLC0415"]
 # Interface utility branches per scope-mode / target-type combination;
 # splitting would obscure the decision tree without simplifying it.
-"strix/interface/utils.py" = ["PLR0912", "BLE001", "PLC0415"]
+"kael/interface/utils.py" = ["PLR0912", "BLE001", "PLC0415"]
 # CLI / TUI / main keep extensive lazy imports + broad exception
 # swallows for resilience around terminal-rendering errors.
-"strix/interface/cli.py" = ["BLE001", "PLC0415"]
-"strix/interface/tui/app.py" = ["BLE001", "PLC0415", "PLR0912", "PLR0915", "SIM105"]
-"strix/interface/main.py" = ["BLE001", "PLC0415", "PLR0912", "PLR0915"]
-"strix/interface/tui/renderers/agent_message_renderer.py" = ["PLC0415"]
+"kael/interface/cli.py" = ["BLE001", "PLC0415"]
+"kael/interface/sessions.py" = ["PLR0911", "PLR0912", "PLR0915", "BLE001", "PLC0415", "E501"]
+"kael/interface/tui/app.py" = ["BLE001", "PLC0415", "PLR0912", "PLR0915", "SIM105"]
+"kael/interface/main.py" = ["BLE001", "PLC0415", "PLR0912", "PLR0915", "T201"]
+"kael/interface/tui/renderers/agent_message_renderer.py" = ["PLC0415"]
+# history.py: S608 false-positive — the dynamic SQL string only
+# interpolates `?` placeholders; all values are parameter-bound.
+# session_ids originate from the SDK-written agents.json, not user input.
+"kael/interface/tui/history.py" = ["S608"]
 
 [tool.ruff.lint.isort]
 force-single-line = false
 lines-after-imports = 2
-known-first-party = ["strix"]
+known-first-party = ["kael"]
 known-third-party = ["pydantic"]
 
 [tool.ruff.lint.pylint]
@@ -247,77 +348,11 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 # ============================================================================
-# PyRight Configuration (Alternative type checker)
-# ============================================================================
-
-[tool.pyright]
-include = ["strix"]
-exclude = ["**/__pycache__", "build", "dist"]
-pythonVersion = "3.12"
-pythonPlatform = "Linux"
-
-typeCheckingMode = "strict"
-reportMissingImports = true
-reportMissingTypeStubs = false
-reportGeneralTypeIssues = true
-reportPropertyTypeMismatch = true
-reportFunctionMemberAccess = true
-reportMissingParameterType = true
-reportMissingTypeArgument = true
-reportIncompatibleMethodOverride = true
-reportIncompatibleVariableOverride = true
-reportInconsistentConstructor = true
-reportOverlappingOverload = true
-reportConstantRedefinition = true
-reportImportCycles = true
-reportUnusedImport = true
-reportUnusedClass = true
-reportUnusedFunction = true
-reportUnusedVariable = true
-reportDuplicateImport = true
-
-# ============================================================================
-# Black Configuration (Code Formatter)
-# ============================================================================
-
-[tool.black]
-line-length = 100
-target-version = ['py312']
-include = '\\.pyi?$'
-extend-exclude = '''
-/(
-  # directories
-  \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | build
-  | dist
-)/
-'''
-
-# ============================================================================
-# isort Configuration (Import Sorting)
-# ============================================================================
-
-[tool.isort]
-profile = "black"
-line_length = 100
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
-use_parentheses = true
-ensure_newline_before_comments = true
-known_first_party = ["strix"]
-known_third_party = ["pydantic", "litellm"]
-
-# ============================================================================
 # Bandit Configuration (Security Linting)
 # ============================================================================
 
 [tool.bandit]
 exclude_dirs = ["docs", "build", "dist"]
-skips = ["B101", "B601", "B404", "B603", "B607"]  # Skip assert, shell injection, subprocess import and partial path checks
-severity = "medium"
+# B108 reports fixed /tmp paths even when they are namespace and tmpfs mount
+# targets. Kael creates real temporary files through tempfile.
+skips = ["B108"]

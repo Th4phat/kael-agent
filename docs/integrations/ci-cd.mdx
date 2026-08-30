@@ -1,90 +1,34 @@
 ---
 title: "CI/CD Integration"
-description: "Run Strix in any CI/CD pipeline"
+description: "Run source-only Kael in controlled automation"
 ---
 
-Strix runs in headless mode for automated pipelines.
+CI runners need Git, uv, Python 3.12 or 3.13, a Docker-compatible runtime, and
+enough storage to build the local Kali-based sandbox. Kael's own CI uses Docker.
 
-## Headless Mode
-
-Use the `-n` or `--non-interactive` flag:
-
-```bash
-strix -n --target ./app --scan-mode quick
-```
-
-For pull-request style CI runs, Strix automatically scopes quick scans to changed files. You can force this behavior and set a base ref explicitly:
+The generic flow is:
 
 ```bash
-strix -n --target ./app --scan-mode quick --scope-mode diff --diff-base origin/main
+TARGET_DIR="$PWD"
+KAEL_SRC="${RUNNER_TEMP:-/tmp}/kael-src"
+git clone --branch v0.1.0 --depth 1 https://github.com/Th4phat/kael-agent.git "$KAEL_SRC"
+uv sync --project "$KAEL_SRC" --frozen
+KAEL_AUTO_BUILD_SANDBOX=1 \
+  uv run --project "$KAEL_SRC" kael "$TARGET_DIR" non-interactive mode quick
 ```
 
-## Exit Codes
+Set `KAEL_LLM` and `LLM_API_KEY` through the CI platform's protected secret
+store. Fetch full history when using diff scope.
+
+## Exit codes
 
 | Code | Meaning |
-|------|---------|
-| 0 | No vulnerabilities found |
-| 1 | Execution error |
-| 2 | Vulnerabilities found |
+|---|---|
+| 0 | Scan completed successfully |
+| 1 | Setup or runtime error |
+| 2 | Invalid input, or one or more findings in a non-interactive scan |
 
-## GitLab CI
-
-```yaml .gitlab-ci.yml
-security-scan:
-  image: docker:latest
-  services:
-    - docker:dind
-  variables:
-    STRIX_LLM: $STRIX_LLM
-    LLM_API_KEY: $LLM_API_KEY
-  script:
-    - curl -sSL https://strix.ai/install | bash
-    - strix -n -t ./ --scan-mode quick
-```
-
-## Jenkins
-
-```groovy Jenkinsfile
-pipeline {
-    agent any
-    environment {
-        STRIX_LLM = credentials('strix-llm')
-        LLM_API_KEY = credentials('llm-api-key')
-    }
-    stages {
-        stage('Security Scan') {
-            steps {
-                sh 'curl -sSL https://strix.ai/install | bash'
-                sh 'strix -n -t ./ --scan-mode quick'
-            }
-        }
-    }
-}
-```
-
-## CircleCI
-
-```yaml .circleci/config.yml
-version: 2.1
-jobs:
-  security-scan:
-    docker:
-      - image: cimg/base:current
-    steps:
-      - checkout
-      - setup_remote_docker
-      - run:
-          name: Install Strix
-          command: curl -sSL https://strix.ai/install | bash
-      - run:
-          name: Run Scan
-          command: strix -n -t ./ --scan-mode quick
-```
-
-<Note>
-All CI platforms require Docker access. Ensure your runner has Docker available.
-</Note>
-
-<Tip>
-If diff-scope fails in CI, fetch full git history (for example, `fetch-depth: 0` in GitHub Actions) so merge-base and branch comparison can be resolved.
-</Tip>
+<Warning>
+Do not run automated active testing against unapproved production targets. Limit
+egress, concurrency, model spend, and the target scope explicitly.
+</Warning>

@@ -1,12 +1,12 @@
 ---
 title: "AWS Bedrock"
-description: "Configure Strix with models via AWS Bedrock"
+description: "Configure Kael with models via AWS Bedrock"
 ---
 
 ## Setup
 
 ```bash
-export STRIX_LLM="bedrock/anthropic.claude-4-5-sonnet-20251022-v1:0"
+export KAEL_LLM="bedrock/anthropic.claude-sonnet-4-6"
 ```
 
 No API key required—uses AWS credentials from environment.
@@ -32,14 +32,14 @@ export AWS_REGION="us-east-1"
 
 Automatically uses instance role credentials.
 
-## Available Models
+## Example Model
 
 | Model | Description |
 |-------|-------------|
-| `bedrock/anthropic.claude-4-5-sonnet-20251022-v1:0` | Claude 4.5 Sonnet |
-| `bedrock/anthropic.claude-4-5-opus-20251022-v1:0` | Claude 4.5 Opus |
-| `bedrock/anthropic.claude-4-5-haiku-20251022-v1:0` | Claude 4.5 Haiku |
-| `bedrock/amazon.titan-text-premier-v2:0` | Amazon Titan Premier v2 |
+| `bedrock/anthropic.claude-sonnet-4-6` | Claude Sonnet 4.6 |
+
+Model IDs and regional availability vary. Confirm them in the
+[Amazon Bedrock model catalog](https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html).
 
 ## Prerequisites
 

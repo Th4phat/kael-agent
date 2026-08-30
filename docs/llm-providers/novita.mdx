@@ -1,35 +1,23 @@
 ---
 title: "Novita AI"
-description: "Configure Strix with Novita AI models"
+description: "Configure Kael with Novita's OpenAI-compatible API"
 ---
 
-[Novita AI](https://novita.ai) provides fast, cost-efficient inference for open-source models via an OpenAI-compatible API.
+[Novita AI](https://novita.ai) exposes an OpenAI-compatible inference API.
 
 ## Setup
 
 ```bash
-export STRIX_LLM="openai/moonshotai/kimi-k2.5"
+export KAEL_LLM="openai/<novita-model-id>"
 export LLM_API_KEY="your-novita-api-key"
 export LLM_API_BASE="https://api.novita.ai/openai"
 ```
 
-## Available Models
+Choose a current identifier from Novita's model catalog and confirm that the
+model supports tool/function calling before starting a scan.
 
-| Model | Configuration |
-|-------|---------------|
-| Kimi K2.5 | `openai/moonshotai/kimi-k2.5` |
-| GLM-5 | `openai/zai-org/glm-5` |
-| MiniMax M2.5 | `openai/minimax/minimax-m2.5` |
+## Get an API key
 
-## Get API Key
-
-1. Sign up at [novita.ai](https://novita.ai)
-2. Navigate to **API Keys** in your dashboard
-3. Create a new key and copy it
-
-## Benefits
-
-- **Cost-efficient** — Competitive pricing with per-token billing
-- **OpenAI-compatible** — Drop-in replacement using `LLM_API_BASE`
-- **Large context** — Models support up to 262k token context windows
-- **Function calling** — All listed models support tool/function calling
+1. Sign in at [novita.ai](https://novita.ai).
+2. Open **API Keys** in the dashboard.
+3. Create a key and store it outside version control.
