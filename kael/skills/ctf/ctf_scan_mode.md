@@ -159,6 +159,9 @@ sherlock, maigret, holehe, subfinder, amass, theHarvester, exiftool
 
 # Misc
 everything else
+
+# Access (challenge only reachable over a ws:// / wss:// gateway, no raw host:port)
+wsrx  # load_skill(["wsrx"]) — bridges the WebSocket to a local 127.0.0.1:PORT for nc/pwntools
 ```
 
 ## Common Pitfalls

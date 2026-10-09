@@ -1,14 +1,13 @@
 ---
 title: "Configuration"
-description: "Supported environment variables and config-file precedence"
+description: "Configure models, providers, runtime, and tools from the TUI or a JSON file"
 ---
 
 Kael resolves configuration in this order, from highest to lowest priority:
 
-1. Process environment variables
-2. A `.env` file in the current working directory
-3. The selected JSON config file
-4. Built-in defaults
+1. The selected JSON config file
+2. Process environment variables for settings absent from the file
+3. Built-in defaults
 
 The default JSON path is `~/.kael/cli-config.json`. Select another file with
 the positional `config` keyword:
@@ -17,9 +16,48 @@ the positional `config` keyword:
 kael ./app config /path/to/config.json
 ```
 
+If no config file exists, Kael imports values from the current directory's
+`.env` into JSON once, including custom variables. The original `.env` is
+left in place. After a config file exists, `.env` is ignored and can be removed.
+An existing JSON config remains authoritative.
+
 Provider-specific authentication variables such as `AZURE_API_KEY`, AWS
 credentials, and Google Application Default Credentials are consumed by
 LiteLLM; see the corresponding provider guide.
+
+## Configure from the TUI
+
+Press **F8** to open Settings, **F7** to select the main model, or **F6** to
+select OpenRouter provider routing in the same editor. The actions are also
+available in **Ctrl+P** as **Edit settings**, **Change model**, and
+**Change OpenRouter provider**. The active config path appears at the top.
+
+The editor lists every supported setting and alias, plus every variable
+already in the active config file. Search by setting name, variable name, or
+settings group, select a row, and edit its value. To add another environment
+variable, enter its name in Search and choose **Add variable**. Credentials
+are masked. Use `true` or `false` for booleans and JSON arrays for lists.
+Blank values clear optional settings; **Reset default** restores the built-in
+default.
+
+Choose **Save** or press **Ctrl+S** to validate and save all edits to the active
+JSON config file. Unrelated variables and top-level metadata are preserved.
+The file is replaced atomically with owner-only permissions.
+**Cancel** or **Escape** discards unsaved edits.
+Aliases for the same setting are synchronized when saving.
+
+Compatible model, reasoning, timeout, and routing changes apply to every
+agent's next request. Requests already in progress keep their original
+settings. A switch between Chat Completions and Responses tool formats
+requires a new run; the active model remains visible in the header.
+Sandbox, startup, and prompt settings apply on a new run. Each setting shows
+when it takes effect.
+
+Saved values take precedence over shell exports on future launches. Kael also
+publishes config values into the current process for SDKs and tools, so
+provider-specific credentials and options such as `BROWSER_BACKEND` can be
+configured here. An interactive launch without a model opens the TUI so you
+can configure it before starting the scan.
 
 ## LLM
 
@@ -30,7 +68,7 @@ LiteLLM; see the corresponding provider guide.
 | `LLM_API_BASE` | — | Custom provider endpoint |
 | `KAEL_REASONING_EFFORT` | `high` | `none`, `minimal`, `low`, `medium`, `high`, or `xhigh` |
 | `LLM_TIMEOUT` | `300` | LLM request timeout in seconds |
-| `KAEL_OPENROUTER_PROVIDER` | — | OpenRouter provider-routing preferences as a JSON object |
+| `KAEL_OPENROUTER_PROVIDER` | — | OpenRouter provider slug (e.g. `deepinfra`) to allow only that provider, or routing preferences as a JSON object |
 | `KAEL_VISION_LLM` | — | Optional dedicated vision-model identifier |
 | `VISION_LLM_API_KEY` | Main key | Credential for the dedicated vision model |
 | `VISION_LLM_API_BASE` | Main base URL | Endpoint for the dedicated vision model |
@@ -46,6 +84,7 @@ LiteLLM; see the corresponding provider guide.
 | `KAEL_RUNTIME_BACKEND` | `docker` | Runtime CLI: `docker` or `podman` |
 | `KAEL_AUTO_BUILD_SANDBOX` | `false` | Permit a missing default image to be built in non-interactive runs |
 | `KAEL_CONTAINER_SOCKET` | Runtime default | Filesystem path to a Docker-compatible API socket |
+| `KAEL_SANDBOX_DNS` | Runtime default | Comma-separated nameservers for the sandbox |
 
 Kael source-builds only its versioned default image. A missing custom image is
 pulled by the selected runtime.
@@ -77,11 +116,34 @@ Docker environment and socket when `KAEL_CONTAINER_SOCKET` is unset.
 
 | Variable | Default | Purpose |
 |---|---:|---|
+| `KAEL_MEMORY_SCOPE` | `agent` | `agent` keeps notes private to each agent in this session; `session` shares notes within a run; `target` also shares learnings across runs with the same targets |
 | `KAEL_MEMORY_LEARNING_TTL_DAYS` | `90` | Learning retention; `0` disables expiry |
 | `KAEL_MEMORY_MAX_LEARNINGS_PER_TARGET` | `500` | Per-target learning cap |
 | `KAEL_PARALLEL_TOOL_CALLS` | `off` | `off`, `safe`, or `all` |
 | `KAEL_TOOL_RESULT_MAX_CHARS` | `20000` | Soft size cap for one tool result |
 | `KAEL_DEDUP_WINDOW_TURNS` | `1` | Window used to warn about repeated tool calls |
+
+Notes and learnings are private to each agent by default. An agent cannot
+list, read, update, or delete another agent's notes through the notes tools,
+including when given a note ID. Each agent's notes are saved in
+`kael_runs/<run>/.state/notes/<agent-id>/notes.json`; resuming that run restores
+the same agent's notes. Another session starts empty, even for the same
+target or agent ID. Missing or invalid agent context cannot access notes.
+
+Press **F8**, search **Notes scope**, and choose `agent` for this default.
+Sharing is opt-in: `session` shares notes among agents in a run, and `target`
+also reuses learnings across runs. Changes apply to new runs. These shared
+scopes use `kael_runs/<run>/.state/notes.json`. Only the `learnings` category
+is shared across target runs; ordinary notes stay in their session.
+The target set is identified by its full URLs, repository URLs, IPs, or local
+paths, with a hash that keeps different target names separate. A prompt-only
+run without targets keeps session scope. The TTL and cap settings apply to
+this optional target memory.
+
+Legacy shared memory folders and session notes files are left in place.
+Agent scope does not import their contents into private agent stores.
+An existing explicit `session` or `target` setting remains a sharing choice;
+select `agent` to turn sharing off for the next run.
 
 ## Malware reverse engineering
 
@@ -104,13 +166,20 @@ sandbox. Use it only in a controlled lab with explicit authorization.
 ```json
 {
   "env": {
-    "KAEL_LLM": "openai/gpt-5.4",
+    "KAEL_LLM": "openrouter/openai/gpt-5.4",
     "LLM_API_KEY": "sk-...",
+    "KAEL_OPENROUTER_PROVIDER": {"only": ["openai"]},
     "KAEL_REASONING_EFFORT": "high",
     "KAEL_RUNTIME_BACKEND": "podman"
   }
 }
 ```
+
+Keys use the same names as the supported environment variables. JSON values
+can use their native types: numbers, booleans, arrays, routing objects, and
+`null` to clear an optional setting. String values from older config files
+are also accepted. Provider selection, model, credentials, and every setting
+below can be edited in the TUI.
 
 Keep credentials out of version control. Kael writes local run events and
 reports under `kael_runs/`; no remote telemetry endpoint is configured by

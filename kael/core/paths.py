@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
 
 
 RUNS_DIR_NAME = "kael_runs"
@@ -36,11 +38,35 @@ def run_record_path(run_dir: Path) -> Path:
     return run_dir / RUN_RECORD_FILENAME
 
 
-def target_slug(targets: list[dict[str, Any]]) -> str:
-    """Derive a filesystem-safe slug from scan targets."""
-    parts = [str(t.get("value") or t.get("workspace_path") or "") for t in targets if t]
-    combined = "_".join(p for p in parts if p) or "default"
-    return re.sub(r"[^a-z0-9]+", "-", combined.lower()).strip("-")[:80]
+def target_slug(targets: Iterable[object]) -> str | None:
+    """Identify the exact target set without merging normalized names."""
+    value_keys = {
+        "repository": "target_repo",
+        "local_code": "target_path",
+        "malware_sample": "target_file",
+        "web_application": "target_url",
+        "ip_address": "target_ip",
+    }
+    identities: set[tuple[str, str]] = set()
+    for target in targets:
+        if not isinstance(target, dict):
+            return None
+        target_type = str(target.get("type") or "unknown")
+        details = target.get("details") or {}
+        key = value_keys.get(target_type)
+        value = details.get(key) if key and isinstance(details, dict) else None
+        value = value or target.get("value") or target.get("workspace_path")
+        if not value or not str(value).strip():
+            return None
+        identities.add((target_type, str(value)))
+    if not identities:
+        return None
+
+    ordered = sorted(identities)
+    payload = json.dumps(ordered, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+    label = re.sub(r"[^a-z0-9]+", "-", ordered[0][1].lower()).strip("-")[:40] or "target"
+    return f"{label}-{digest}"
 
 
 def memory_dir_for(slug: str) -> Path:

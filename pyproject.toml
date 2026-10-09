@@ -33,6 +33,8 @@ classifiers = [
 ]
 dependencies = [
   "openai-agents[litellm]==0.14.6",
+  # openai 2.45 made InputTokensDetails.cache_write_tokens required; agents 0.14.6 never sets it
+  "openai<2.45",
   "pydantic>=2.11.3",
   "pydantic-settings>=2.13.0",
   "rich",
@@ -198,6 +200,17 @@ module = [
     "kael.tools.view_image.*",
 ]
 ignore_errors = true
+
+# New TUI modules are written against the strict gate; exact-module
+# overrides take precedence over the glob above.
+[[tool.mypy.overrides]]
+module = [
+    "kael.interface.tui.widgets",
+    "kael.interface.tui.theme",
+    "kael.interface.tui.messages",
+    "kael.interface.tui.demo",
+]
+ignore_errors = false
 
 # ============================================================================
 # Ruff Configuration (Fast Python Linter & Formatter)

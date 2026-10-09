@@ -15,6 +15,7 @@ from kael.config.models import (
     DEFAULT_MODEL_RETRY,
     KaelProvider,
     configure_sdk_model_defaults,
+    openrouter_extra_body,
 )
 from kael.report.state import get_global_report_state
 
@@ -192,7 +193,13 @@ async def check_duplicate(
         response = await model.get_response(
             system_instructions=DEDUPE_SYSTEM_PROMPT,
             input=user_msg,
-            model_settings=ModelSettings(retry=DEFAULT_MODEL_RETRY, include_usage=True),
+            model_settings=ModelSettings(
+                retry=DEFAULT_MODEL_RETRY,
+                include_usage=True,
+                extra_body=openrouter_extra_body(
+                    resolved_model, settings.llm.openrouter_provider, settings.llm.api_base
+                ),
+            ),
             tools=[],
             output_schema=None,
             handoffs=[],

@@ -17,11 +17,15 @@ def send_user_message_to_agent(
     live_view: Any,
     target_agent_id: str,
     message: str,
-) -> bool:
-    if loop is None or loop.is_closed():
-        return False
+) -> dict[str, Any] | None:
+    """Echo the message into the live view and deliver it to the agent.
 
-    live_view.record_user_message(target_agent_id, message)
+    Returns the recorded chat event, or ``None`` if the scan loop is gone.
+    """
+    if loop is None or loop.is_closed():
+        return None
+
+    event: dict[str, Any] = live_view.record_user_message(target_agent_id, message)
     future = asyncio.run_coroutine_threadsafe(
         coordinator.send(
             target_agent_id,
@@ -30,7 +34,7 @@ def send_user_message_to_agent(
         loop,
     )
     future.add_done_callback(_log_delivery_failure)
-    return True
+    return event
 
 
 def _log_delivery_failure(future: Any) -> None:

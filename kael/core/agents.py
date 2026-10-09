@@ -7,17 +7,21 @@ import contextlib
 import json
 import logging
 import tempfile
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
+    from agents import RunConfig
     from agents.items import TResponseInputItem
     from agents.memory import Session
+
+    from kael.config.settings import Settings
 
 
 logger = logging.getLogger(__name__)
@@ -56,12 +60,83 @@ class AgentCoordinator:
         self._snapshot_dirty = False
         self._snapshot_task: asyncio.Task[None] | None = None
         self.is_shutting_down = False
+        self.run_config: RunConfig | None = None
+        self.model_uses_chat_completions: bool | None = None
+        self.model_api_base: str | None = None
+        # Invoked synchronously after every graph mutation (the TUI uses it
+        # to pull a fresh snapshot instead of polling).
+        self.on_change: Callable[[], None] | None = None
 
     def set_snapshot_path(self, path: Path) -> None:
         self._snapshot_path = path
 
     def mark_shutting_down(self) -> None:
         self.is_shutting_down = True
+
+    def set_openrouter_provider(
+        self, provider: dict[str, Any] | None, api_base: str | None = None
+    ) -> None:
+        """Change routing for the next request of every agent in this run."""
+        from kael.config.models import openrouter_extra_body
+
+        config = self.run_config
+        if config is None or config.model_settings is None:
+            return
+        model_name = config.model if isinstance(config.model, str) else ""
+        extra_body = config.model_settings.extra_body
+        body = dict(extra_body) if isinstance(extra_body, Mapping) else {}
+        body.pop("provider", None)
+        active_base = (
+            self.model_api_base if self.model_uses_chat_completions is not None else api_base
+        )
+        body.update(openrouter_extra_body(model_name, provider, active_base) or {})
+        config.model_settings.extra_body = body or None
+
+    def apply_model_settings(self, settings: Settings) -> bool:
+        """Update compatible live requests; defer tool-format changes to a new run."""
+        from kael.config.models import (
+            KaelProvider,
+            configure_sdk_model_defaults,
+            uses_chat_completions_tool_schema,
+        )
+        from kael.core.inputs import make_model_settings
+
+        config = self.run_config
+        if config is None:
+            return True
+        llm = settings.llm
+        model = (llm.model or "").strip()
+        if not model or (
+            self.model_uses_chat_completions is not None
+            and self.model_uses_chat_completions
+            != uses_chat_completions_tool_schema(model, settings)
+        ):
+            return False
+        fresh = make_model_settings(
+            llm.reasoning_effort,
+            model_name=model,
+            parallel_tool_calls_mode=settings.tool_harness.parallel_tool_calls_mode,
+            openrouter_provider=llm.openrouter_provider,
+            api_base=llm.api_base,
+        )
+        current = config.model_settings or fresh
+        body = dict(current.extra_body) if isinstance(current.extra_body, Mapping) else {}
+        body.pop("provider", None)
+        if isinstance(fresh.extra_body, Mapping):
+            body.update(fresh.extra_body)
+        model_settings = replace(
+            current,
+            reasoning=fresh.reasoning,
+            parallel_tool_calls=fresh.parallel_tool_calls,
+            extra_body=body or None,
+            extra_args={**(current.extra_args or {}), "timeout": llm.timeout},
+        )
+        configure_sdk_model_defaults(settings)
+        config.model_provider = KaelProvider()
+        config.model_settings = model_settings
+        config.model = model
+        self.model_api_base = llm.api_base
+        return True
 
     @asynccontextmanager
     async def lock(self) -> AsyncIterator[None]:
@@ -313,6 +388,8 @@ class AgentCoordinator:
         pending write — typically only needed on shutdown or in tests.
         No-op when no snapshot path has been configured.
         """
+        if self.on_change is not None:
+            self.on_change()
         if self._snapshot_path is None:
             return
         async with self._lock:

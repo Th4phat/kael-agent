@@ -14,6 +14,7 @@ from agents import RunContextWrapper, function_tool
 
 from kael.core.agents import Status, coordinator_from_context
 from kael.skills import validate_requested_skills
+from kael.tools.notes.tools import _create_note_impl, notes_store_from_context
 
 
 _ACTIVE_STATUSES: frozenset[str] = frozenset({"running", "waiting"})
@@ -45,6 +46,51 @@ def _coerce_skills(value: list[str] | str | None) -> list[str]:
 
 def _ctx(ctx: RunContextWrapper) -> dict[str, Any]:
     return ctx.context if isinstance(ctx.context, dict) else {}
+
+
+@function_tool(timeout=30)
+async def recall_history(ctx: RunContextWrapper, query: str = "", limit: int = 5) -> str:
+    """Search your full stored conversation after older steps leave the model context.
+
+    Give a keyword to find an old command, result, or instruction. With no
+    query, return the most recent stored entries. Only your own history is read.
+    """
+    inner = _ctx(ctx)
+    coordinator = coordinator_from_context(inner)
+    agent_id = inner.get("agent_id")
+    if coordinator is None or not isinstance(agent_id, str):
+        return "Agent session unavailable."
+    async with coordinator.lock():
+        runtime = coordinator.runtimes.get(agent_id)
+        session = runtime.session if runtime else None
+    if session is None:
+        return "Agent session unavailable."
+
+    items = await session.get_items()
+    names = {
+        item.get("call_id"): item.get("name", "")
+        for item in items
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    }
+    matches = []
+    needle = query.casefold()
+    for index in range(len(items) - 1, -1, -1):
+        item = items[index]
+        if not isinstance(item, dict) or item.get("type") == "reasoning":
+            continue
+        value = item.get("output", item.get("content", item.get("arguments", "")))
+        content = (
+            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        )
+        position = content.casefold().find(needle)
+        if position < 0:
+            continue
+        excerpt = content[max(0, position - 300) : position + 900]
+        tool = item.get("name") or names.get(item.get("call_id"), "")
+        matches.append(f"[{index}] {item.get('type', item.get('role', '?'))} {tool}\n{excerpt}")
+        if len(matches) >= max(1, min(limit, 5)):
+            break
+    return "\n\n".join(matches) if matches else "No stored history matched."
 
 
 def _render_completion_report(
@@ -376,7 +422,7 @@ async def create_agent(
     ctx: RunContextWrapper,
     name: str,
     task: str,
-    inherit_context: bool = True,
+    inherit_context: bool = False,
     skills: list[str] | str | None = None,
 ) -> str:
     """Spawn a specialist child agent to run in parallel.
@@ -413,9 +459,8 @@ async def create_agent(
             ``send_message_to_agent`` flows).
         task: Specific objective. Be concrete — what to test, what
             success looks like, any constraints.
-        inherit_context: Default ``True``. The child receives the
-            parent's input history as background; only set ``False``
-            when starting a clean-slate task.
+        inherit_context: Set ``True`` only when the child needs recent
+            parent history beyond the task description.
         skills: List of skill names (e.g. ``["xss", "sql_injection"]``).
             Max 5; prefer 1-3.
     """
@@ -548,19 +593,29 @@ async def agent_finish(
             default=str,
         )
 
+    async with coordinator.lock():
+        agent_name = coordinator.names.get(me, me)
+    report = _render_completion_report(
+        agent_name=agent_name,
+        agent_id=me,
+        task=str(inner.get("task", "")),
+        success=success,
+        result_summary=result_summary,
+        findings=list(findings or []),
+        recommendations=list(final_recommendations or []),
+    )
+    note = _create_note_impl(
+        f"Task result: {agent_name}",
+        report,
+        "methodology",
+        ["progress", me, "completed" if success else "failed"],
+        store=notes_store_from_context(inner),
+    )
+    if not note.get("success"):
+        logger.warning("Could not record task result for %s: %s", me, note.get("error"))
+
     parent_notified = False
     if report_to_parent:
-        async with coordinator.lock():
-            agent_name = coordinator.names.get(me, me)
-        report = _render_completion_report(
-            agent_name=agent_name,
-            agent_id=me,
-            task=str(inner.get("task", "")),
-            success=success,
-            result_summary=result_summary,
-            findings=list(findings or []),
-            recommendations=list(final_recommendations or []),
-        )
         await coordinator.send(
             parent_id,
             {

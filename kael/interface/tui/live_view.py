@@ -29,6 +29,7 @@ class TuiLiveView:
         self._events_by_agent: dict[str, list[dict[str, Any]]] = {}  # Index for O(1) lookups
         self._next_event_id = 1
         self._open_assistant_event_by_agent: dict[str, dict[str, Any]] = {}
+        self._open_reasoning_event_by_agent: dict[str, dict[str, Any]] = {}
         self._tool_event_by_call_id: dict[str, dict[str, Any]] = {}
 
     def hydrate_from_run_dir(self, run_dir: Path) -> None:
@@ -95,8 +96,8 @@ class TuiLiveView:
             current["error_message"] = error_message
         current["updated_at"] = now
 
-    def record_user_message(self, agent_id: str, content: str) -> None:
-        self._append_event(
+    def record_user_message(self, agent_id: str, content: str) -> dict[str, Any]:
+        return self._append_event(
             agent_id,
             "chat",
             {
@@ -106,22 +107,27 @@ class TuiLiveView:
             },
         )
 
-    def ingest_sdk_event(self, agent_id: str, event: Any) -> None:
+    def ingest_sdk_event(self, agent_id: str, event: Any) -> list[dict[str, Any]]:
+        """Fold one SDK stream event into the view; return the events it touched."""
         event_type = getattr(event, "type", "")
         if event_type == "raw_response_event":
-            self._ingest_raw_response_event(agent_id, getattr(event, "data", None))
-            return
+            return self._ingest_raw_response_event(agent_id, getattr(event, "data", None))
         if event_type != "run_item_stream_event":
-            return
+            return []
 
         item = getattr(event, "item", None)
         item_type = getattr(item, "type", "")
-        if item_type == "message_output_item":
-            self._record_assistant_message(agent_id, _sdk_message_text(item), final=True)
+        touched: list[dict[str, Any]] = []
+        if item_type == "reasoning_item":
+            touched += self._close_reasoning(agent_id)
+        elif item_type == "message_output_item":
+            touched += self._close_reasoning(agent_id)
+            touched += self._record_assistant_message(agent_id, _sdk_message_text(item), final=True)
         elif item_type == "tool_call_item":
-            self._record_tool_call(agent_id, item)
+            touched.append(self._record_tool_call(agent_id, item))
         elif item_type == "tool_call_output_item":
-            self._record_tool_output(agent_id, item)
+            touched.append(self._record_tool_output(agent_id, item))
+        return touched
 
     def events_for_agent(self, agent_id: str) -> list[dict[str, Any]]:
         return self._events_by_agent.get(agent_id, [])
@@ -129,26 +135,47 @@ class TuiLiveView:
     def has_events_for_agent(self, agent_id: str) -> bool:
         return bool(self._events_by_agent.get(agent_id))
 
-    def is_open_assistant_event(self, event_id: str) -> bool:
-        """True if the event is the currently-streaming assistant message
-        that has not yet been finalized.
-
-        The TUI uses this to switch into the tail-render fast path: instead
-        of re-rendering the entire accumulated content on every delta, it
-        only renders ``content[prev_len:]`` and concatenates to the cached
-        ``Text``.
-        """
-        for event in self._open_assistant_event_by_agent.values():
-            if event["id"] == event_id:
-                return True
-        return False
-
-    def _ingest_raw_response_event(self, agent_id: str, data: Any) -> None:
+    def _ingest_raw_response_event(self, agent_id: str, data: Any) -> list[dict[str, Any]]:
         data_type = getattr(data, "type", "")
+        delta = getattr(data, "delta", "")
+        if not delta:
+            return []
         if data_type == "response.output_text.delta":
-            delta = getattr(data, "delta", "")
-            if delta:
-                self._record_assistant_message(agent_id, str(delta), final=False)
+            # Answer text starting means the model is done thinking.
+            touched = self._close_reasoning(agent_id)
+            touched += self._record_assistant_message(agent_id, str(delta), final=False)
+            return touched
+        # The SDK normalises both Responses-API reasoning summaries and
+        # third-party ``reasoning_content`` into these two event types.
+        if data_type in {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}:
+            return [self._record_reasoning(agent_id, str(delta))]
+        return []
+
+    def _record_reasoning(self, agent_id: str, delta: str) -> dict[str, Any]:
+        existing = self._open_reasoning_event_by_agent.get(agent_id)
+        if existing is None:
+            event = self._append_event(
+                agent_id,
+                "chat",
+                {
+                    "role": "reasoning",
+                    "content": delta,
+                    "metadata": {"source": "sdk_stream", "streaming": True},
+                },
+            )
+            self._open_reasoning_event_by_agent[agent_id] = event
+            return event
+        existing["data"]["content"] = f"{existing['data'].get('content', '')}{delta}"
+        self._bump_event(existing)
+        return existing
+
+    def _close_reasoning(self, agent_id: str) -> list[dict[str, Any]]:
+        event = self._open_reasoning_event_by_agent.pop(agent_id, None)
+        if event is None:
+            return []
+        event["data"]["metadata"]["streaming"] = False
+        self._bump_event(event)
+        return [event]
 
     def _ingest_session_history_item(
         self,
@@ -216,9 +243,11 @@ class TuiLiveView:
                 timestamp=timestamp,
             )
 
-    def _record_assistant_message(self, agent_id: str, content: str, *, final: bool) -> None:
+    def _record_assistant_message(
+        self, agent_id: str, content: str, *, final: bool
+    ) -> list[dict[str, Any]]:
         if not content:
-            return
+            return []
         existing = self._open_assistant_event_by_agent.get(agent_id)
         if existing is None:
             event = self._append_event(
@@ -232,7 +261,7 @@ class TuiLiveView:
             )
             if not final:
                 self._open_assistant_event_by_agent[agent_id] = event
-            return
+            return [event]
 
         data = existing["data"]
         if final:
@@ -242,9 +271,10 @@ class TuiLiveView:
         else:
             data["content"] = f"{data.get('content', '')}{content}"
         self._bump_event(existing)
+        return [existing]
 
-    def _record_tool_call(self, agent_id: str, item: Any) -> None:
-        self._record_tool_call_data(agent_id, _sdk_tool_call_data(item))
+    def _record_tool_call(self, agent_id: str, item: Any) -> dict[str, Any]:
+        return self._record_tool_call_data(agent_id, _sdk_tool_call_data(item))
 
     def _record_tool_call_data(
         self,
@@ -252,7 +282,7 @@ class TuiLiveView:
         call: dict[str, Any],
         *,
         timestamp: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         call_id = call["call_id"]
         existing = self._tool_event_by_call_id.get(call_id)
         tool_data = {
@@ -265,12 +295,13 @@ class TuiLiveView:
         if existing is None:
             event = self._append_event(agent_id, "tool", tool_data, timestamp=timestamp)
             self._tool_event_by_call_id[call_id] = event
-        else:
-            existing["data"].update(tool_data)
-            self._bump_event(existing, timestamp=timestamp)
+            return event
+        existing["data"].update(tool_data)
+        self._bump_event(existing, timestamp=timestamp)
+        return existing
 
-    def _record_tool_output(self, agent_id: str, item: Any) -> None:
-        self._record_tool_output_data(agent_id, _sdk_tool_output_data(item))
+    def _record_tool_output(self, agent_id: str, item: Any) -> dict[str, Any]:
+        return self._record_tool_output_data(agent_id, _sdk_tool_output_data(item))
 
     def _record_tool_output_data(
         self,
@@ -278,7 +309,7 @@ class TuiLiveView:
         output: dict[str, Any],
         *,
         timestamp: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         call_id = output["call_id"]
         event = self._tool_event_by_call_id.get(call_id)
         if event is None:
@@ -300,6 +331,7 @@ class TuiLiveView:
         event["data"]["result"] = result
         event["data"]["status"] = _tool_status_from_result(result)
         self._bump_event(event, timestamp=timestamp)
+        return event
 
     def _append_event(
         self,

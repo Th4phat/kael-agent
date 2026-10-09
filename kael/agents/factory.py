@@ -8,6 +8,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from agents.agent import ToolsToFinalOutputResult
+from agents.exceptions import ModelBehaviorError
 from agents.sandbox import SandboxAgent
 from agents.sandbox.capabilities import Filesystem, Shell
 from agents.sandbox.errors import InvalidManifestPathError
@@ -19,6 +20,7 @@ from kael.tools import registry as _registry_mod
 from kael.tools.agents_graph.tools import (
     agent_finish,
     create_agent,
+    recall_history,
     send_message_to_agent,
     stop_agent,
     view_agent_graph,
@@ -75,6 +77,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class RepeatedInvalidToolArguments(ModelBehaviorError):
+    def __init__(self, tool_name: str) -> None:
+        self.tool_name = tool_name
+        super().__init__(f"Repeated invalid JSON arguments for {tool_name}")
+
+
 def _format_tool_error(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
@@ -92,14 +100,29 @@ def _wrap_function_tool(
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
         try:
-            return await invoke_tool(ctx, raw_input)
+            result = await invoke_tool(ctx, raw_input)
+            if isinstance(getattr(ctx, "context", None), dict):
+                ctx.context["_invalid_tool_json_count"] = 0
+            return result
         except ValidationError as exc:
+            invalid_json = any(err.get("type") == "json_invalid" for err in exc.errors())
+            if invalid_json and isinstance(getattr(ctx, "context", None), dict):
+                count = ctx.context.get("_invalid_tool_json_count", 0) + 1
+                ctx.context["_invalid_tool_json_count"] = count
+                if count >= 2:
+                    ctx.context["_invalid_tool_json_count"] = 0
+                    raise RepeatedInvalidToolArguments(tool_name) from exc
             parts: list[str] = []
             for err in exc.errors():
                 loc = ".".join(str(x) for x in err.get("loc", ()))
                 msg = err.get("msg", "invalid")
                 parts.append(f"{loc}: {msg}" if loc else msg)
-            return f"{tool_name}: invalid arguments — " + "; ".join(parts)
+            hint = (
+                " Use complete JSON; for Ctrl+C set interrupt=true with the session_id."
+                if invalid_json and tool_name == "write_stdin"
+                else ""
+            )
+            return f"{tool_name}: invalid arguments — " + "; ".join(parts) + hint
         except InvalidManifestPathError as exc:
             rel = exc.context.get("rel", "?")
             return (
@@ -208,13 +231,14 @@ def _swap_view_image(toolset: Any) -> None:
 
 
 def _decode_write_stdin_chars(raw_input: str) -> str:
-    """Pre-decode ``\\n`` / ``\\u00ff`` escapes in the ``chars`` arg of write_stdin."""
-    if "\\" not in raw_input:
-        return raw_input
+    """Normalize escaped characters and the JSON-safe interrupt shortcut."""
     try:
         parsed = json.loads(raw_input)
     except json.JSONDecodeError:
         return raw_input
+    if isinstance(parsed, dict) and parsed.pop("interrupt", False) is True:
+        parsed["chars"] = "\x03"
+        return json.dumps(parsed)
     if not isinstance(parsed, dict) or not isinstance(parsed.get("chars"), str):
         return raw_input
     chars = parsed["chars"]
@@ -227,6 +251,11 @@ def _decode_write_stdin_chars(raw_input: str) -> str:
 def _wrap_write_stdin(tool: FunctionTool) -> FunctionTool:
     """Stack a char-escape pre-decode on top of the standard wrapper."""
     invoke_tool = tool.on_invoke_tool
+    tool.params_json_schema["properties"]["interrupt"] = {
+        "type": "boolean",
+        "description": "Set true to send Ctrl+C to the running process.",
+    }
+    tool.description += " To stop a running process, use interrupt=true with its session_id."
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
         return await invoke_tool(ctx, _decode_write_stdin_chars(raw_input))
@@ -239,12 +268,8 @@ def _configure_shell_tools(toolset: Any, *, chat_completions: bool) -> None:
     for name, tool in vars(toolset).items():
         if not isinstance(tool, FunctionTool):
             continue
-        if tool.name == "write_stdin":
-            wrapped = _wrap_write_stdin(tool)
-        else:
-            wrapped = _wrap_function_tool(tool)
-        if chat_completions:
-            wrapped = _wrap_function_tool(wrapped, catch_errors=True)
+        wrapped = _wrap_write_stdin(tool) if tool.name == "write_stdin" else tool
+        wrapped = _wrap_function_tool(wrapped, catch_errors=chat_completions)
         setattr(toolset, name, wrapped)
 
 
@@ -343,6 +368,7 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     send_message_to_agent,
     wait_for_message,
     create_agent,
+    recall_history,
     stop_agent,
 )
 
@@ -414,6 +440,7 @@ _DEFAULT_TOOL_META: tuple[tuple[Tool, str, str, tuple[str, ...]], ...] = (
             send_message_to_agent,
             wait_for_message,
             create_agent,
+            recall_history,
             stop_agent,
         )
     ),

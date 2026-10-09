@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path  # noqa: TC003 - used by pydantic at runtime for re_yara_rules_dir
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import (
     BaseSettings,
+    EnvSettingsSource,
+    NoDecode,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
 
 from kael.version import default_sandbox_image
+
+
+if TYPE_CHECKING:
+    from pydantic.fields import FieldInfo
 
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
@@ -21,15 +28,37 @@ _BASE_CONFIG = SettingsConfigDict(
     case_sensitive=False,
     populate_by_name=True,
     extra="ignore",
-    env_file=".env",
-    env_file_encoding="utf-8",
 )
+
+
+def _aliases_for(finfo: FieldInfo) -> list[str]:
+    """Collect every env-var name that should populate ``finfo``."""
+    aliases: list[str] = []
+    if finfo.alias:
+        aliases.append(finfo.alias)
+    va = finfo.validation_alias
+    if isinstance(va, AliasChoices):
+        aliases.extend(c for c in va.choices if isinstance(c, str))
+    elif isinstance(va, str):
+        aliases.append(va)
+    return list(dict.fromkeys(aliases))
 
 
 class _KaelBaseSettings(BaseSettings):
     """Base settings with Kael's documented source precedence."""
 
     model_config = _BASE_CONFIG
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def empty_optional_value(cls, value: Any, info: ValidationInfo) -> Any:
+        if (
+            value == ""
+            and info.field_name is not None
+            and type(None) in get_args(cls.model_fields[info.field_name].annotation)
+        ):
+            return None
+        return value
 
     @classmethod
     def settings_customise_sources(
@@ -40,20 +69,36 @@ class _KaelBaseSettings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        del settings_cls
-        return env_settings, dotenv_settings, init_settings, file_secret_settings
+        del dotenv_settings
+        if isinstance(env_settings, EnvSettingsSource):
+            configured = init_settings()
+            overridden: set[str] = set()
+            for name, info in settings_cls.model_fields.items():
+                names = [name, *_aliases_for(info)]
+                if any(key in configured for key in names):
+                    overridden.update(key.lower() for key in names)
+            env_settings.env_vars = {
+                key: value for key, value in env_settings.env_vars.items() if key not in overridden
+            }
+        return init_settings, env_settings, file_secret_settings
 
 
 class LlmSettings(_KaelBaseSettings):
     model_config = _BASE_CONFIG
 
-    model: str | None = Field(default=None, alias="KAEL_LLM")
+    model: str | None = Field(
+        default=None,
+        alias="KAEL_LLM",
+        description="Provider/model identifier, such as openrouter/anthropic/claude-sonnet-4.6.",
+    )
     api_key: str | None = Field(
         default=None,
+        title="API key",
         validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),
     )
     api_base: str | None = Field(
         default=None,
+        title="API base URL",
         validation_alias=AliasChoices(
             "LLM_API_BASE",
             "OPENAI_API_BASE",
@@ -63,15 +108,16 @@ class LlmSettings(_KaelBaseSettings):
         ),
     )
     reasoning_effort: ReasoningEffort = Field(default="high", alias="KAEL_REASONING_EFFORT")
-    timeout: int = Field(default=300, alias="LLM_TIMEOUT")
-    openrouter_provider: dict[str, Any] | None = Field(
+    timeout: int = Field(default=300, gt=0, alias="LLM_TIMEOUT")
+    openrouter_provider: Annotated[dict[str, Any] | None, NoDecode] = Field(
         default=None,
         alias="KAEL_OPENROUTER_PROVIDER",
+        title="OpenRouter provider",
         description=(
-            "OpenRouter provider routing preferences as JSON, e.g. "
-            '{"order":["DeepSeek"],"allow_fallbacks":false}. Only applied when '
-            "the model resolves through openrouter. See "
-            "https://openrouter.ai/docs/features/provider-routing"
+            "OpenRouter provider slug (e.g. deepinfra) to allow only that provider, "
+            'or routing preferences as JSON (e.g. {"order":["deepinfra"]}). '
+            "Only applied to OpenRouter requests. See "
+            "https://openrouter.ai/docs/guides/routing/provider-selection"
         ),
     )
     vision_model: str | None = Field(
@@ -96,6 +142,21 @@ class LlmSettings(_KaelBaseSettings):
         description="API base URL for the vision model. Falls back to LLM_API_BASE.",
     )
 
+    @field_validator("openrouter_provider", mode="before")
+    @classmethod
+    def parse_openrouter_provider(cls, value: Any) -> dict[str, Any] | None:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            if value.startswith(("{", "[")) or value == "null":
+                value = json.loads(value)
+            else:
+                return {"only": [value]}
+        if value is not None and not isinstance(value, dict):
+            raise ValueError("Enter a provider slug or a JSON routing object.")
+        return value
+
 
 class RuntimeSettings(_KaelBaseSettings):
     model_config = _BASE_CONFIG
@@ -109,6 +170,15 @@ class RuntimeSettings(_KaelBaseSettings):
     container_socket: str | None = Field(
         default=None,
         alias="KAEL_CONTAINER_SOCKET",
+    )
+    sandbox_dns: str | None = Field(
+        default=None,
+        alias="KAEL_SANDBOX_DNS",
+        description=(
+            "Comma-separated nameservers for the sandbox. Unset inherits the "
+            "runtime default (host resolv.conf), which breaks under rootless "
+            "Podman when the host's first resolvers are unreachable (e.g. Tailscale)."
+        ),
     )
 
 
@@ -128,10 +198,10 @@ class IntegrationSettings(_KaelBaseSettings):
 
 
 class MemorySettings(_KaelBaseSettings):
-    """Cross-run learning memory bounds.
+    """Private agent notes and optional shared learning memory.
 
-    Learnings are kept in ``~/.kael/memory/<target-slug>/learnings.json``
-    and persist across separate scans of the same target. To keep that
+    With target scope selected, learnings are kept in
+    ``~/.kael/memory/<target-slug>/learnings.json`` across scans of the same target. To keep that
     file from growing unbounded:
 
     - ``learning_ttl_days`` - how old an entry can be (by ``updated_at``)
@@ -144,6 +214,16 @@ class MemorySettings(_KaelBaseSettings):
 
     model_config = _BASE_CONFIG
 
+    scope: Literal["agent", "session", "target"] = Field(
+        default="agent",
+        alias="KAEL_MEMORY_SCOPE",
+        title="Notes scope",
+        description=(
+            "agent keeps notes private to each agent in this session; "
+            "session shares notes within a run; target also shares learnings "
+            "across runs with the same targets."
+        ),
+    )
     learning_ttl_days: int = Field(default=90, alias="KAEL_MEMORY_LEARNING_TTL_DAYS")
     max_learnings_per_target: int = Field(default=500, alias="KAEL_MEMORY_MAX_LEARNINGS_PER_TARGET")
 

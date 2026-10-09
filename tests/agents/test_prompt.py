@@ -56,6 +56,35 @@ class TestRenderSystemPrompt:
         freeform = render_system_prompt(prompt_only=True)
         assert default != freeform
 
+    @pytest.mark.parametrize("prompt_only", [False, True])
+    @pytest.mark.parametrize("scope", ["agent", "session", "target"])
+    def test_memory_instructions_describe_the_active_scope(
+        self, prompt_only: bool, scope: str
+    ) -> None:
+        rendered = render_system_prompt(
+            prompt_only=prompt_only, system_prompt_context={"notes_scope": scope}
+        )
+        memory = rendered.split("<memory_system>", 1)[1].split("</memory_system>", 1)[0]
+        if scope == "agent":
+            assert "AGENT SCOPE (DEFAULT):" in memory
+            assert "private to you in this session" in memory
+            assert "another agent's notes" in memory
+            assert "SESSION SCOPE:" not in memory
+            assert "TARGET LEARNING MEMORY ENABLED:" not in memory
+        elif scope == "session":
+            assert "SESSION SCOPE:" in memory
+            assert "TARGET LEARNING MEMORY ENABLED:" not in memory
+            assert "including scans of the same target" in memory
+        else:
+            assert "TARGET LEARNING MEMORY ENABLED:" in memory
+            assert "Ordinary notes remain session-local" in memory
+            assert "SESSION SCOPE:" not in memory
+        assert "Check the note's context" in memory
+
+    def test_memory_instructions_default_to_agent_privacy(self) -> None:
+        rendered = render_system_prompt()
+        assert "AGENT SCOPE (DEFAULT):" in rendered
+
     def test_failure_raises_instead_of_returning_empty(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -209,6 +209,7 @@ async def warm_up_llm() -> None:
         KaelProvider,
         configure_sdk_model_defaults,
         is_known_openai_bare_model,
+        openrouter_extra_body,
     )
 
     console = Console()
@@ -256,7 +257,11 @@ async def warm_up_llm() -> None:
             model.get_response(
                 system_instructions="You are a helpful assistant.",
                 input="Reply with just 'OK'.",
-                model_settings=ModelSettings(),
+                model_settings=ModelSettings(
+                    extra_body=openrouter_extra_body(
+                        raw_model, llm.openrouter_provider, llm.api_base
+                    ),
+                ),
                 tools=[],
                 output_schema=None,
                 handoffs=[],
@@ -413,6 +418,7 @@ _TOP_LEVEL_COMMANDS: frozenset[str] = frozenset(
         "sessions",
         "sandbox",
         "version",
+        "demo",
     }
 )
 
@@ -444,6 +450,10 @@ def _dispatch(argv: list[str]) -> argparse.Namespace:
         raise SystemExit(0)
     if first == "sandbox":
         raise SystemExit(_run_sandbox_command(argv[2:]))
+    if first in {"demo", "--demo"}:
+        from kael.interface.tui.demo import run_demo
+
+        raise SystemExit(run_demo(argv[2:]))
     if first in {"list", "ls", "show", "report", "sessions"}:
         from kael.interface.sessions import cmd_sessions
 
@@ -825,13 +835,12 @@ def main() -> None:
     if args.config:
         apply_config_override(validate_config_file(args.config))
 
-    check_docker_installed()
-    pull_docker_image(build_requested=args.build_sandbox)
-
-    validate_environment()
-    asyncio.run(warm_up_llm())
-
-    persist_current()
+    if args.non_interactive or (load_settings().llm.model or "").strip():
+        check_docker_installed()
+        pull_docker_image(build_requested=args.build_sandbox)
+        validate_environment()
+        asyncio.run(warm_up_llm())
+        persist_current()
 
     args.run_name = args.resume or generate_run_name(
         args.targets_info, prompt=getattr(args, "instruction", None)

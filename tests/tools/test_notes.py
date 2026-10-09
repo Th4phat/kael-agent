@@ -27,33 +27,36 @@ from kael.tools.notes import tools as notes_tools
 @pytest.fixture
 def isolated_notes_state(
     tmp_path: Path,
-) -> tuple[Path, Path]:
-    """Point the notes module at a fresh state_dir + memory_dir per test."""
+) -> tuple[notes_tools.NotesStore, Path]:
+    """Create a separate notes store and target memory file per test."""
     state_dir = tmp_path / "state"
     memory_dir = tmp_path / "memory"
     state_dir.mkdir()
     memory_dir.mkdir()
-    notes_tools.hydrate_notes_from_disk(state_dir)
-    notes_tools.hydrate_learnings_from_memory(memory_dir)
-    yield state_dir, memory_dir
-    notes_tools._notes_storage.clear()
-    notes_tools._notes_path = None
-    notes_tools._memory_path = None
-    notes_tools._memory_file_lock = threading.RLock()
+    store = notes_tools.hydrate_notes_from_disk(state_dir, scope="session")
+    notes_tools.hydrate_learnings_from_memory(store, memory_dir)
+    return store, memory_dir
 
 
 class TestNoteIdLength:
-    def test_note_id_is_12_chars(self, isolated_notes_state: tuple[Path, Path]) -> None:
-        result = notes_tools._create_note_impl(title="x", content="y", category="general")
+    def test_note_id_is_12_chars(
+        self, isolated_notes_state: tuple[notes_tools.NotesStore, Path]
+    ) -> None:
+        result = notes_tools._create_note_impl(
+            title="x", content="y", category="general", store=isolated_notes_state[0]
+        )
         assert result["success"] is True
         assert len(result["note_id"]) == 12
 
-    def test_learning_id_is_12_chars(self, isolated_notes_state: tuple[Path, Path]) -> None:
+    def test_learning_id_is_12_chars(
+        self, isolated_notes_state: tuple[notes_tools.NotesStore, Path]
+    ) -> None:
         result = notes_tools._create_note_impl(
             title="jwt_none_alg",
             content="didn't work",
             category="learnings",
             outcome="dead_end",
+            store=isolated_notes_state[0],
         )
         assert result["success"] is True
         assert len(result["note_id"]) == 12
@@ -61,13 +64,16 @@ class TestNoteIdLength:
 
 class TestPersistLearningLock:
     def test_concurrent_persists_preserve_all_writes(
-        self, isolated_notes_state: tuple[Path, Path]
+        self, isolated_notes_state: tuple[notes_tools.NotesStore, Path]
     ) -> None:
         """20 threads x 25 writes = 500 concurrent ``add_learning`` calls.
         Every note must survive in the on-disk file (last-writer-wins per ID
         is fine, but no note may be silently dropped by a torn read-modify-write).
         """
-        _, memory_dir = isolated_notes_state
+        first_store, memory_dir = isolated_notes_state
+        second_store = notes_tools.hydrate_notes_from_disk(first_store.path.parent / "other")
+        notes_tools.hydrate_learnings_from_memory(second_store, memory_dir)
+        stores = (first_store, second_store)
         n_threads = 20
         per_thread = 25
 
@@ -78,6 +84,7 @@ class TestPersistLearningLock:
                     content=f"ctx {tid}-{i}",
                     category="learnings",
                     outcome="unknown",
+                    store=stores[tid % 2],
                 )
 
         threads = [threading.Thread(target=writer, args=(t,)) for t in range(n_threads)]
@@ -92,22 +99,27 @@ class TestPersistLearningLock:
         assert len(on_disk) == n_threads * per_thread
 
     def test_locked_outcome_still_requires_force(
-        self, isolated_notes_state: tuple[Path, Path]
+        self, isolated_notes_state: tuple[notes_tools.NotesStore, Path]
     ) -> None:
         create = notes_tools._create_note_impl(
             title="sql_injection_login",
             content="attempted; blocked",
             category="learnings",
             outcome="dead_end",
+            store=isolated_notes_state[0],
         )
         assert create["success"] is True
         nid = create["note_id"]
 
-        blocked = notes_tools._update_note_impl(note_id=nid, outcome="promising")
+        blocked = notes_tools._update_note_impl(
+            note_id=nid, outcome="promising", store=isolated_notes_state[0]
+        )
         assert blocked["success"] is False
         assert "locked" in blocked["error"].lower()
 
-        forced = notes_tools._update_note_impl(note_id=nid, outcome="promising", force=True)
+        forced = notes_tools._update_note_impl(
+            note_id=nid, outcome="promising", force=True, store=isolated_notes_state[0]
+        )
         assert forced["success"] is True
 
 
@@ -133,18 +145,12 @@ class TestCrossRunHydration:
         }
         (memory_dir / "learnings.json").write_text(json.dumps(prior), encoding="utf-8")
 
-        notes_tools._notes_storage.clear()
-        notes_tools._notes_path = None
-        notes_tools._memory_path = None
-        notes_tools.hydrate_learnings_from_memory(memory_dir)
+        store = notes_tools.hydrate_notes_from_disk(tmp_path / "state")
+        notes_tools.hydrate_learnings_from_memory(store, memory_dir)
 
-        got = notes_tools._get_note_impl("abc123def456")
+        got = notes_tools._get_note_impl("abc123def456", store=store)
         assert got["success"] is True
         assert got["note"]["outcome"] == "dead_end"
-
-        # Cleanup
-        notes_tools._notes_storage.clear()
-        notes_tools._memory_path = None
 
     def test_current_run_wins_on_id_collision(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -182,43 +188,43 @@ class TestCrossRunHydration:
         }
         (memory_dir / "learnings.json").write_text(json.dumps(mem_notes), encoding="utf-8")
 
-        notes_tools._notes_storage.clear()
-        notes_tools.hydrate_notes_from_disk(state_dir)
-        notes_tools.hydrate_learnings_from_memory(memory_dir)
+        store = notes_tools.hydrate_notes_from_disk(state_dir, scope="session")
+        notes_tools.hydrate_learnings_from_memory(store, memory_dir)
 
-        got = notes_tools._get_note_impl("collision01")
+        got = notes_tools._get_note_impl("collision01", store=store)
         assert got["success"] is True
         assert got["note"]["title"] == "current_run_version"
-
-        # Cleanup
-        notes_tools._notes_storage.clear()
-        notes_tools._notes_path = None
-        notes_tools._memory_path = None
 
 
 class TestNoteImplementations:
     """The synchronous implementations own the Kael data contract."""
 
-    def test_create_and_list_round_trip(self, isolated_notes_state: tuple[Path, Path]) -> None:
+    def test_create_and_list_round_trip(
+        self, isolated_notes_state: tuple[notes_tools.NotesStore, Path]
+    ) -> None:
         created = notes_tools._create_note_impl(
             title="t",
             content="c",
             category="general",
+            store=isolated_notes_state[0],
         )
         assert created["success"] is True
         assert len(created["note_id"]) == 12
 
-        listed = notes_tools._list_notes_impl()
+        listed = notes_tools._list_notes_impl(store=isolated_notes_state[0])
         assert listed["success"] is True
         assert listed["filtered_count"] == 1
 
-    def test_add_learning_persists_to_memory(self, isolated_notes_state: tuple[Path, Path]) -> None:
+    def test_add_learning_persists_to_memory(
+        self, isolated_notes_state: tuple[notes_tools.NotesStore, Path]
+    ) -> None:
         _, memory_dir = isolated_notes_state
         result = notes_tools._create_note_impl(
             title="ssrf_metadata",
             content="blocked",
             category="learnings",
             outcome="dead_end",
+            store=isolated_notes_state[0],
         )
         assert result["success"] is True
 
@@ -300,17 +306,11 @@ class TestMemoryPruning:
             },
         )
 
-        notes_tools._notes_storage.clear()
-        notes_tools._notes_path = None
-        notes_tools._memory_path = None
-        notes_tools.hydrate_learnings_from_memory(memory_dir)
+        store = notes_tools.hydrate_notes_from_disk(tmp_path / "state")
+        notes_tools.hydrate_learnings_from_memory(store, memory_dir)
 
-        assert "fresh" in notes_tools._notes_storage
-        assert "stale" not in notes_tools._notes_storage
-
-        # Cleanup
-        notes_tools._notes_storage.clear()
-        notes_tools._memory_path = None
+        assert "fresh" in store.notes
+        assert "stale" not in store.notes
 
     def test_ttl_zero_disables_expiry(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -330,15 +330,9 @@ class TestMemoryPruning:
                 }
             },
         )
-        notes_tools._notes_storage.clear()
-        notes_tools._notes_path = None
-        notes_tools._memory_path = None
-        notes_tools.hydrate_learnings_from_memory(memory_dir)
-        assert "ancient" in notes_tools._notes_storage
-
-        # Cleanup
-        notes_tools._notes_storage.clear()
-        notes_tools._memory_path = None
+        store = notes_tools.hydrate_notes_from_disk(tmp_path / "state")
+        notes_tools.hydrate_learnings_from_memory(store, memory_dir)
+        assert "ancient" in store.notes
 
     def test_cap_evicts_lowest_priority_first(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -378,26 +372,16 @@ class TestMemoryPruning:
             },
         )
 
-        notes_tools._notes_storage.clear()
-        notes_tools._notes_path = None
-        notes_tools._memory_path = None
-        notes_tools.hydrate_learnings_from_memory(memory_dir)
+        store = notes_tools.hydrate_notes_from_disk(tmp_path / "state")
+        notes_tools.hydrate_learnings_from_memory(store, memory_dir)
 
         # Cap=2 across 3 entries, ranked by importance:
         #   confirmed   (priority 0) — kept
         #   dead_end_old (priority 2) — kept
         #   unknown_new (priority 3) — dropped
         # Highest-priority (lowest-rank) entries always survive.
-        survivors = {
-            k
-            for k in notes_tools._notes_storage
-            if k in {"confirmed", "dead_end_old", "unknown_new"}
-        }
+        survivors = {k for k in store.notes if k in {"confirmed", "dead_end_old", "unknown_new"}}
         assert survivors == {"confirmed", "dead_end_old"}
-
-        # Cleanup
-        notes_tools._notes_storage.clear()
-        notes_tools._memory_path = None
 
     def test_persist_prunes_existing_file(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -427,11 +411,8 @@ class TestMemoryPruning:
         }
         (memory_dir / "learnings.json").write_text(json.dumps(prior), encoding="utf-8")
 
-        notes_tools._notes_storage.clear()
-        notes_tools._notes_path = None
-        notes_tools._memory_path = None
-        notes_tools.hydrate_notes_from_disk(state_dir)
-        notes_tools.hydrate_learnings_from_memory(memory_dir)
+        store = notes_tools.hydrate_notes_from_disk(state_dir)
+        notes_tools.hydrate_learnings_from_memory(store, memory_dir)
 
         # Now add a fresh learning
         notes_tools._create_note_impl(
@@ -439,6 +420,7 @@ class TestMemoryPruning:
             content="now",
             category="learnings",
             outcome="unknown",
+            store=store,
         )
 
         on_disk = json.loads((memory_dir / "learnings.json").read_text(encoding="utf-8"))
@@ -446,9 +428,5 @@ class TestMemoryPruning:
         # The on-disk keys are note IDs; the title is in the value.
         assert any(note.get("title") == "fresh" for note in on_disk.values())
 
-        # Cleanup
-        notes_tools._notes_storage.clear()
-        notes_tools._notes_path = None
-        notes_tools._memory_path = None
         loader._cached = None
         loader._override = None

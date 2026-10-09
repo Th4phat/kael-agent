@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from agents import set_default_openai_api, set_default_openai_key, set_tracing_disabled
 from agents.models.multi_provider import MultiProvider
@@ -15,7 +16,7 @@ from agents.retry import (
 
 
 if TYPE_CHECKING:
-    from agents.models.interface import ModelProvider
+    from agents.models.interface import Model, ModelProvider
 
     from kael.config.settings import Settings
 
@@ -25,6 +26,25 @@ class KaelProvider(MultiProvider):
     so users type ``deepseek/deepseek-chat`` rather than
     ``litellm/deepseek/deepseek-chat``.
     """
+
+    def __init__(self) -> None:
+        from kael.config import load_settings
+
+        self._llm = load_settings().llm.model_copy(deep=True)
+        super().__init__(
+            openai_api_key=self._llm.api_key or "missing",
+            openai_base_url=self._llm.api_base or "https://api.openai.com/v1",
+            openai_use_responses=not bool(self._llm.api_base),
+        )
+
+    def get_model(self, model_name: str | None) -> Model:
+        from agents.extensions.models.litellm_model import LitellmModel
+
+        model = super().get_model(model_name)
+        if isinstance(model, LitellmModel):
+            model.api_key = self._llm.api_key
+            model.base_url = self._llm.api_base
+        return model
 
     def _resolve_prefixed_model(
         self,
@@ -58,18 +78,41 @@ DEFAULT_MODEL_RETRY = ModelRetrySettings(
 )
 
 
+def openrouter_extra_body(
+    model_name: str,
+    provider: dict[str, Any] | None,
+    api_base: str | None = None,
+) -> dict[str, Any] | None:
+    """Apply provider routing to OpenRouter models and compatible endpoints."""
+    name = model_name.strip().lower()
+    for prefix in ("litellm/", "any-llm/"):
+        name = name.removeprefix(prefix)
+    if provider and (
+        name.startswith("openrouter/") or urlsplit(api_base or "").hostname == "openrouter.ai"
+    ):
+        return {"provider": provider}
+    return None
+
+
+_mirrored_api_keys: dict[str, str] = {}
+
+
 def configure_sdk_model_defaults(settings: Settings) -> None:
     """Apply Kael config to SDK-native defaults."""
     llm = settings.llm
     set_tracing_disabled(True)
     _configure_litellm_compatibility()
+    _configure_litellm_default("api_key", llm.api_key)
+    _configure_litellm_default("api_base", llm.api_base)
+    for name, value in _mirrored_api_keys.items():
+        if os.environ.get(name) == value:
+            del os.environ[name]
+    _mirrored_api_keys.clear()
     if llm.api_key:
         set_default_openai_key(llm.api_key, use_for_tracing=False)
-        _configure_litellm_default("api_key", llm.api_key)
         _mirror_api_key_to_provider_env(llm.model, llm.api_key)
     if llm.api_base:
         os.environ["OPENAI_BASE_URL"] = llm.api_base
-        _configure_litellm_default("api_base", llm.api_base)
         set_default_openai_api("chat_completions")
     else:
         set_default_openai_api("responses")
@@ -91,7 +134,9 @@ def _mirror_api_key_to_provider_env(model_name: str | None, api_key: str) -> Non
         return
     for env_key in report.get("missing_keys") or []:
         if env_key.endswith("_API_KEY"):
-            os.environ.setdefault(env_key, api_key)
+            if env_key not in os.environ:
+                os.environ[env_key] = api_key
+                _mirrored_api_keys[env_key] = api_key
 
 
 def _configure_litellm_compatibility() -> None:
@@ -121,7 +166,7 @@ def _register_litellm_cost_callback() -> None:
         bucket.append(litellm_cost_callback)
 
 
-def _configure_litellm_default(name: str, value: str) -> None:
+def _configure_litellm_default(name: str, value: str | None) -> None:
     """Set LiteLLM's module-level defaults without adding a provider wrapper."""
     import litellm
 

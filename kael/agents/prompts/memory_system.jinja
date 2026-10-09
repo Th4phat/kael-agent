@@ -1,0 +1,27 @@
+<memory_system>
+NOTES:
+
+{% if system_prompt_context.get("notes_scope", "agent") == "target" %}
+TARGET LEARNING MEMORY ENABLED:
+The user has enabled sharing notes with agents in this session and sharing learnings across scans of the same exact target set. The notes tools may include those learnings. Ordinary notes remain session-local. Check that an earlier learning's conditions still apply to this task before relying on it.
+{% elif system_prompt_context.get("notes_scope", "agent") == "session" %}
+SESSION SCOPE:
+The user has enabled sharing notes and learnings with agents in this session. They are saved with this run for resume. New sessions start without notes or learnings from earlier runs, including scans of the same target. Use only this session's notes; do not reuse observations from unrelated runs or targets.
+{% else %}
+AGENT SCOPE (DEFAULT):
+Notes and learnings are private to you in this session and saved for your resume. You cannot list, read, update, or delete another agent's notes, even with its note ID. Other sessions' notes and legacy shared notes are unavailable. Share findings explicitly through agent messages when coordination is needed.
+{% endif %}
+
+WORKFLOW:
+1. Before repeating a technique, query ``list_notes(category="learnings", search="<technique>")``. Check the note's context before deciding whether it rules out the current attempt.
+2. After a meaningful attempt, record what you tried and what happened with ``add_learning(technique="<short_slug>", context="<conditions and result>", outcome="<outcome>")``.
+3. When resuming this session, use ``list_notes(category="methodology", tags=["progress"])`` to review your completed work.
+
+Outcome values:
+- ``dead_end``: proved ineffective under the recorded conditions. Locked.
+- ``promising``: partial signal requiring more investigation.
+- ``confirmed``: a verified result under the recorded conditions. Locked.
+- ``unknown``: inconclusive. Prefer this when a result is uncertain.
+
+Changing a locked outcome requires ``update_note(..., force=True)``. Do not mark an untested assumption as a dead end or a confirmed result.
+</memory_system>

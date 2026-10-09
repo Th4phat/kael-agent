@@ -1,12 +1,11 @@
-from functools import cache
 from typing import Any, ClassVar
 
-from pygments.lexers import PythonLexer
-from pygments.styles import get_style_by_name
 from rich.text import Text
 from textual.widgets import Static
 
-from .base_renderer import BaseToolRenderer
+from kael.interface.utils import get_cvss_color, get_severity_color
+
+from .base_renderer import BaseToolRenderer, highlight
 from .registry import register_tool_renderer
 
 
@@ -20,12 +19,6 @@ def _coerce_list_of_dicts(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
-
-
-@cache
-def _get_style_colors() -> dict[Any, str]:
-    style = get_style_by_name("native")
-    return {token: f"#{style_def['color']}" for token, style_def in style if style_def["color"]}
 
 
 FIELD_STYLE = "bold #4ade80"
@@ -43,47 +36,9 @@ class CreateVulnerabilityReportRenderer(BaseToolRenderer):
     tool_name: ClassVar[str] = "create_vulnerability_report"
     css_classes: ClassVar[list[str]] = ["tool-call", "reporting-tool"]
 
-    SEVERITY_COLORS: ClassVar[dict[str, str]] = {
-        "critical": "#dc2626",
-        "high": "#ea580c",
-        "medium": "#d97706",
-        "low": "#65a30d",
-        "info": "#0284c7",
-    }
-
-    @classmethod
-    def _get_token_color(cls, token_type: Any) -> str | None:
-        colors = _get_style_colors()
-        while token_type:
-            if token_type in colors:
-                return colors[token_type]
-            token_type = token_type.parent
-        return None
-
     @classmethod
     def _highlight_python(cls, code: str) -> Text:
-        lexer = PythonLexer()
-        text = Text()
-
-        for token_type, token_value in lexer.get_tokens(code):
-            if not token_value:
-                continue
-            color = cls._get_token_color(token_type)
-            text.append(token_value, style=color)
-
-        return text
-
-    @classmethod
-    def _get_cvss_color(cls, cvss_score: float) -> str:
-        if cvss_score >= 9.0:
-            return "#dc2626"
-        if cvss_score >= 7.0:
-            return "#ea580c"
-        if cvss_score >= 4.0:
-            return "#d97706"
-        if cvss_score >= 0.1:
-            return "#65a30d"
-        return "#6b7280"
+        return highlight(code, "python")
 
     @classmethod
     def render(cls, tool_data: dict[str, Any]) -> Static:  # noqa: PLR0912, PLR0915
@@ -125,14 +80,12 @@ class CreateVulnerabilityReportRenderer(BaseToolRenderer):
         if severity:
             text.append("\n\n")
             text.append("Severity: ", style=FIELD_STYLE)
-            severity_color = cls.SEVERITY_COLORS.get(severity.lower(), "#6b7280")
-            text.append(severity.upper(), style=f"bold {severity_color}")
+            text.append(severity.upper(), style=f"bold {get_severity_color(severity.lower())}")
 
         if cvss_score is not None:
             text.append("\n\n")
             text.append("CVSS Score: ", style=FIELD_STYLE)
-            cvss_color = cls._get_cvss_color(cvss_score)
-            text.append(str(cvss_score), style=f"bold {cvss_color}")
+            text.append(str(cvss_score), style=f"bold {get_cvss_color(cvss_score)}")
 
         if target:
             text.append("\n\n")

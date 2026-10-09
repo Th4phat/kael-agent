@@ -10,6 +10,7 @@ from typing import Any
 from agents import RunContextWrapper, function_tool
 
 from kael.core.agents import coordinator_from_context
+from kael.tools.notes.tools import _create_note_impl, notes_store_from_context
 
 
 logger = logging.getLogger(__name__)
@@ -184,5 +185,15 @@ async def finish_scan(
         and coordinator is not None
         and isinstance(me, str)
     ):
+        note = _create_note_impl(
+            f"Scan completed: {me}",
+            f"Summary: {executive_summary}\nMethodology: {methodology}\n"
+            f"Analysis: {technical_analysis}\nRecommendations: {recommendations}",
+            "methodology",
+            ["progress", me, "completed"],
+            store=notes_store_from_context(inner),
+        )
+        if not note.get("success"):
+            logger.warning("Could not record scan result for %s: %s", me, note.get("error"))
         await coordinator.set_status(me, "completed")
     return json.dumps(result, ensure_ascii=False, default=str)

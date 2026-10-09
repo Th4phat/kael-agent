@@ -979,6 +979,7 @@ source = { editable = "." }
 dependencies = [
     { name = "cvss" },
     { name = "docker" },
+    { name = "openai" },
     { name = "openai-agents", extra = ["litellm"] },
     { name = "pefile" },
     { name = "pydantic" },
@@ -1010,6 +1011,7 @@ dev = [
 requires-dist = [
     { name = "cvss", specifier = ">=3.2" },
     { name = "docker", specifier = ">=7.1.0" },
+    { name = "openai", specifier = "<2.45" },
     { name = "openai-agents", extras = ["litellm"], specifier = "==0.14.6" },
     { name = "pefile", specifier = ">=2024.8.26" },
     { name = "pydantic", specifier = ">=2.11.3" },

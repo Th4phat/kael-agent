@@ -1,9 +1,4 @@
-"""Per-run notes storage — mirrored to {state_dir}/notes.json.
-
-Learnings (category="learnings") are additionally persisted to a
-target-scoped cross-run memory file so agents can avoid repeating
-dead ends across separate scans of the same target.
-"""
+"""Private agent notes, with opt-in session and target sharing."""
 
 from __future__ import annotations
 
@@ -11,14 +6,18 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import tempfile
 import threading
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from agents import RunContextWrapper, function_tool
+
+from kael.core.paths import memory_dir_for, target_slug
 
 
 if TYPE_CHECKING:
@@ -28,7 +27,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_notes_storage: dict[str, dict[str, Any]] = {}
 _VALID_NOTE_CATEGORIES = [
     "general",
     "findings",
@@ -40,12 +38,37 @@ _VALID_NOTE_CATEGORIES = [
 ]
 _VALID_OUTCOMES = ["dead_end", "promising", "confirmed", "unknown"]
 _LOCKED_OUTCOMES = {"dead_end", "confirmed"}
-_notes_lock = threading.RLock()
 _DEFAULT_CONTENT_PREVIEW_CHARS = 280
 
-_notes_path: Path | None = None
-_memory_path: Path | None = None  # cross-run learnings file
 _memory_file_lock = threading.RLock()  # guards cross-run read-modify-write
+_SESSION_REQUIRED = "Notes require the current session and agent context"
+
+
+@dataclass
+class NotesStore:
+    path: Path
+    scope: Literal["agent", "session", "target"] = "agent"
+    notes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    memory_path: Path | None = None
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    _agent_stores: dict[str, NotesStore] = field(default_factory=dict, repr=False)
+
+
+def notes_store_from_context(context: Any) -> NotesStore | None:
+    store = context.get("notes_store") if isinstance(context, dict) else None
+    if not isinstance(store, NotesStore):
+        return None
+    if store.scope != "agent":
+        return store
+    agent_id = context.get("agent_id")
+    if not isinstance(agent_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", agent_id):
+        return None
+    with store.lock:
+        if agent_id not in store._agent_stores:
+            store._agent_stores[agent_id] = hydrate_notes_from_disk(
+                store.path.parent / "notes" / agent_id, scope="session"
+            )
+        return store._agent_stores[agent_id]
 
 
 def _memory_settings() -> MemorySettings:
@@ -110,71 +133,74 @@ def _prune_learnings(entries: dict[str, dict[str, Any]]) -> dict[str, dict[str, 
     return dict(ranked[:max_count])
 
 
-def hydrate_notes_from_disk(state_dir: Path) -> None:
-    global _notes_path  # noqa: PLW0603
-    _notes_path = state_dir / "notes.json"
-    with _notes_lock:
-        _notes_storage.clear()
-        if not _notes_path.exists():
-            return
+def hydrate_notes_from_disk(
+    state_dir: Path,
+    *,
+    targets: list[dict[str, Any]] | None = None,
+    scope: Literal["agent", "session", "target"] = "agent",
+) -> NotesStore:
+    store = NotesStore(path=state_dir / "notes.json", scope=scope)
+    if scope != "agent" and store.path.exists():
         try:
-            data = json.loads(_notes_path.read_text(encoding="utf-8"))
+            data = json.loads(store.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             logger.exception(
                 "notes.json at %s is unreadable; starting with empty notes",
-                _notes_path,
+                store.path,
             )
-            return
-        if not isinstance(data, dict):
-            return
-        _notes_storage.update(
-            {
-                nid: note
-                for nid, note in data.items()
-                if isinstance(nid, str) and isinstance(note, dict)
-            }
-        )
-        logger.info(
-            "notes hydrated from %s (%d note(s))",
-            _notes_path,
-            len(_notes_storage),
-        )
+        else:
+            if isinstance(data, dict):
+                store.notes.update(
+                    {
+                        nid: note
+                        for nid, note in data.items()
+                        if isinstance(nid, str) and isinstance(note, dict)
+                    }
+                )
+    if scope == "target":
+        slug = target_slug(targets or [])
+        if slug is not None:
+            hydrate_learnings_from_memory(store, memory_dir_for(slug))
+        else:
+            store.scope = "session"
+    logger.info("notes hydrated from %s (%d note(s))", store.path, len(store.notes))
+    return store
 
 
-def hydrate_learnings_from_memory(memory_dir: Path) -> None:
-    """Load cross-run learnings into the shared notes store.
-
-    Must be called AFTER hydrate_notes_from_disk so that current-run
-    notes are not wiped. Learnings from memory are merged in; current-run
-    notes with the same ID take precedence.
-    """
-    global _memory_path  # noqa: PLW0603
+def hydrate_learnings_from_memory(store: NotesStore, memory_dir: Path) -> None:
+    """Merge target learnings into this session; current notes take precedence."""
     memory_dir.mkdir(parents=True, exist_ok=True)
-    _memory_path = memory_dir / "learnings.json"
-    if not _memory_path.exists():
-        logger.info("no cross-run learnings at %s", _memory_path)
+    store.memory_path = memory_dir / "learnings.json"
+    if not store.memory_path.exists():
+        logger.info("no cross-run learnings at %s", store.memory_path)
         return
     try:
-        data = json.loads(_memory_path.read_text(encoding="utf-8"))
+        data = json.loads(store.memory_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        logger.exception("learnings.json at %s is unreadable; skipping", _memory_path)
+        logger.exception("learnings.json at %s is unreadable; skipping", store.memory_path)
         return
     if not isinstance(data, dict):
         return
-    with _notes_lock:
+    with store.lock:
         # Apply TTL and cap *before* merging so an over-cap, expired
         # cross-run file doesn't blow up per-run memory. Pruning the
         # pruned set preserves the on-disk file as-is — eviction is
         # only persisted on the next write.
-        pruned = _prune_learnings({k: v for k, v in data.items() if isinstance(v, dict)})
+        pruned = _prune_learnings(
+            {
+                k: v
+                for k, v in data.items()
+                if isinstance(v, dict) and v.get("category") == "learnings"
+            }
+        )
         loaded = 0
         for nid, note in pruned.items():
-            if isinstance(nid, str) and nid not in _notes_storage:
-                _notes_storage[nid] = note
+            if isinstance(nid, str) and nid not in store.notes:
+                store.notes[nid] = note
                 loaded += 1
     logger.info(
         "cross-run learnings merged from %s (%d new, %d pruned)",
-        _memory_path,
+        store.memory_path,
         loaded,
         len(data) - loaded,
     )
@@ -199,15 +225,12 @@ def _atomic_write(path: Path, data: dict[str, Any]) -> None:
         logger.exception("atomic write to %s failed", path)
 
 
-def _persist() -> None:
-    path = _notes_path
-    if path is None:
-        return
-    with _notes_lock:
-        _atomic_write(path, _notes_storage)
+def _persist(store: NotesStore) -> None:
+    with store.lock:
+        _atomic_write(store.path, store.notes)
 
 
-def _persist_learning(note_id: str, note: dict[str, Any]) -> None:
+def _persist_learning(store: NotesStore, note_id: str, note: dict[str, Any] | None) -> None:
     """Append/update a single learning in the cross-run memory file.
 
     The read-modify-write of ``learnings.json`` is guarded by an
@@ -216,7 +239,7 @@ def _persist_learning(note_id: str, note: dict[str, Any]) -> None:
     to the same target-slug memory are out of scope; the file is
     per-user, not shared.
     """
-    path = _memory_path
+    path = store.memory_path
     if path is None:
         return
     with _memory_file_lock:
@@ -225,7 +248,10 @@ def _persist_learning(note_id: str, note: dict[str, Any]) -> None:
             if path.exists():
                 with contextlib.suppress(OSError, json.JSONDecodeError):
                     existing = json.loads(path.read_text(encoding="utf-8"))
-            existing[note_id] = note
+            if note is None:
+                existing.pop(note_id, None)
+            else:
+                existing[note_id] = note
             # Prune expired entries and enforce the per-target cap.
             # Done inside the lock so a concurrent write can't race
             # with us and leave an over-cap file behind.
@@ -236,13 +262,14 @@ def _persist_learning(note_id: str, note: dict[str, Any]) -> None:
 
 
 def _filter_notes(
+    store: NotesStore,
     category: str | None = None,
     tags: list[str] | None = None,
     search_query: str | None = None,
     outcome: str | None = None,
 ) -> list[dict[str, Any]]:
     filtered: list[dict[str, Any]] = []
-    for note_id, note in _notes_storage.items():
+    for note_id, note in store.notes.items():
         if category and note.get("category") != category:
             continue
         if tags:
@@ -296,8 +323,12 @@ def _create_note_impl(
     category: str = "general",
     tags: list[str] | None = None,
     outcome: str | None = None,
+    *,
+    store: NotesStore | None,
 ) -> dict[str, Any]:
-    with _notes_lock:
+    if store is None:
+        return {"success": False, "error": _SESSION_REQUIRED}
+    with store.lock:
         try:
             if not title or not title.strip():
                 return {"success": False, "error": "Title cannot be empty", "note_id": None}
@@ -330,18 +361,18 @@ def _create_note_impl(
             }
             if outcome is not None:
                 note["outcome"] = outcome
-            _notes_storage[note_id] = note
+            store.notes[note_id] = note
         except (ValueError, TypeError) as e:
             return {"success": False, "error": f"Failed to create note: {e}", "note_id": None}
         else:
-            _persist()
+            _persist(store)
             if category == "learnings":
-                _persist_learning(note_id, note)
+                _persist_learning(store, note_id, note)
             return {
                 "success": True,
                 "note_id": note_id,
                 "message": f"Note '{title}' created successfully",
-                "total_count": len(_notes_storage),
+                "total_count": len(store.notes),
             }
 
 
@@ -351,11 +382,15 @@ def _list_notes_impl(
     search: str | None = None,
     include_content: bool = False,
     outcome: str | None = None,
+    *,
+    store: NotesStore | None,
 ) -> dict[str, Any]:
-    with _notes_lock:
+    if store is None:
+        return {"success": False, "error": _SESSION_REQUIRED}
+    with store.lock:
         try:
             filtered = _filter_notes(
-                category=category, tags=tags, search_query=search, outcome=outcome
+                store, category=category, tags=tags, search_query=search, outcome=outcome
             )
             notes = [_to_note_listing_entry(n, include_content=include_content) for n in filtered]
         except (ValueError, TypeError) as e:
@@ -370,16 +405,18 @@ def _list_notes_impl(
             "success": True,
             "notes": notes,
             "filtered_count": len(notes),
-            "total_count": len(_notes_storage),
+            "total_count": len(store.notes),
         }
 
 
-def _get_note_impl(note_id: str) -> dict[str, Any]:
-    with _notes_lock:
+def _get_note_impl(note_id: str, *, store: NotesStore | None) -> dict[str, Any]:
+    if store is None:
+        return {"success": False, "error": _SESSION_REQUIRED}
+    with store.lock:
         try:
             if not note_id or not note_id.strip():
                 return {"success": False, "error": "Note ID cannot be empty", "note": None}
-            note = _notes_storage.get(note_id)
+            note = store.notes.get(note_id)
             if note is None:
                 return {
                     "success": False,
@@ -401,12 +438,16 @@ def _update_note_impl(
     tags: list[str] | None = None,
     outcome: str | None = None,
     force: bool = False,
+    *,
+    store: NotesStore | None,
 ) -> dict[str, Any]:
-    with _notes_lock:
+    if store is None:
+        return {"success": False, "error": _SESSION_REQUIRED}
+    with store.lock:
         try:
-            if note_id not in _notes_storage:
+            if note_id not in store.notes:
                 return {"success": False, "error": f"Note with ID '{note_id}' not found"}
-            note = _notes_storage[note_id]
+            note = store.notes[note_id]
             # Guard: locked outcomes require explicit force=True
             current_outcome = note.get("outcome")
             if current_outcome in _LOCKED_OUTCOMES and not force:
@@ -438,34 +479,38 @@ def _update_note_impl(
         except (ValueError, TypeError) as e:
             return {"success": False, "error": f"Failed to update note: {e}"}
         else:
-            _persist()
+            _persist(store)
             if note.get("category") == "learnings":
-                _persist_learning(note_id, note)
+                _persist_learning(store, note_id, note)
             return {
                 "success": True,
                 "note_id": note_id,
                 "message": f"Note '{note['title']}' updated successfully",
-                "total_count": len(_notes_storage),
+                "total_count": len(store.notes),
             }
 
 
-def _delete_note_impl(note_id: str) -> dict[str, Any]:
-    with _notes_lock:
+def _delete_note_impl(note_id: str, *, store: NotesStore | None) -> dict[str, Any]:
+    if store is None:
+        return {"success": False, "error": _SESSION_REQUIRED}
+    with store.lock:
         try:
-            if note_id not in _notes_storage:
+            if note_id not in store.notes:
                 return {"success": False, "error": f"Note with ID '{note_id}' not found"}
-            note = _notes_storage[note_id]
+            note = store.notes[note_id]
             note_title = note["title"]
-            del _notes_storage[note_id]
+            del store.notes[note_id]
         except (ValueError, TypeError) as e:
             return {"success": False, "error": f"Failed to delete note: {e}"}
         else:
-            _persist()
+            _persist(store)
+            if note.get("category") == "learnings":
+                _persist_learning(store, note_id, None)
             return {
                 "success": True,
                 "note_id": note_id,
                 "message": f"Note '{note_title}' deleted successfully",
-                "total_count": len(_notes_storage),
+                "total_count": len(store.notes),
             }
 
 
@@ -479,9 +524,9 @@ async def create_note(
 ) -> str:
     """Document an observation, finding, methodology step, or research note.
 
-    Notes are visible to every agent in the same scan for the lifetime
-    of the run; they live in-memory only and are cleared when the
-    process exits.
+    Notes are private to the current agent in this session by default
+    and saved for resume. Sharing with other agents or target runs
+    requires the user to explicitly select a shared notes scope.
 
     For actionable tasks, use ``todo`` instead — notes are for capturing
     information, todos are for tracking work.
@@ -507,7 +552,14 @@ async def create_note(
         tags: Optional free-form tags.
     """
     return json.dumps(
-        await asyncio.to_thread(_create_note_impl, title, content, category, tags),
+        await asyncio.to_thread(
+            _create_note_impl,
+            title,
+            content,
+            category,
+            tags,
+            store=notes_store_from_context(ctx.context),
+        ),
         ensure_ascii=False,
         default=str,
     )
@@ -522,7 +574,9 @@ async def list_notes(
     include_content: bool = False,
     outcome: str | None = None,
 ) -> str:
-    """List existing notes — metadata-first by default.
+    """List notes accessible to the current agent, metadata first by default.
+
+    By default this includes only your own notes in this session.
 
     Filters compose: passing ``category="findings"`` and
     ``tags=["sqli"]`` returns notes that are *both* in the findings
@@ -535,7 +589,7 @@ async def list_notes(
 
     To check memory before attempting a technique:
     ``list_notes(category="learnings", search="<technique>")``
-    A ``"dead_end"`` outcome means skip it — it's already been tried.
+    Skip a ``"dead_end"`` only when its conditions still match this task.
 
     Args:
         category: Filter by category.
@@ -554,6 +608,7 @@ async def list_notes(
             search=search,
             include_content=include_content,
             outcome=outcome,
+            store=notes_store_from_context(ctx.context),
         ),
         ensure_ascii=False,
         default=str,
@@ -562,13 +617,19 @@ async def list_notes(
 
 @function_tool(timeout=30)
 async def get_note(ctx: RunContextWrapper, note_id: str) -> str:
-    """Fetch one note by its 12-char ID. Returns the full content.
+    """Fetch an accessible note by its 12-char ID, including full content.
+
+    By default another agent's or session's note ID does not grant access.
 
     Args:
         note_id: Note id from ``create_note`` or a ``list_notes`` entry.
     """
     return json.dumps(
-        await asyncio.to_thread(_get_note_impl, note_id), ensure_ascii=False, default=str
+        await asyncio.to_thread(
+            _get_note_impl, note_id, store=notes_store_from_context(ctx.context)
+        ),
+        ensure_ascii=False,
+        default=str,
     )
 
 
@@ -582,7 +643,9 @@ async def update_note(
     outcome: str | None = None,
     force: bool = False,
 ) -> str:
-    """Update a note's title, content, tags, or outcome.
+    """Update an accessible note's title, content, tags, or outcome.
+
+    By default only your own notes in this session are accessible.
 
     Pass ``None`` for any field you want left unchanged. Replacing
     ``content`` is a full overwrite — to append, fetch first with
@@ -590,9 +653,9 @@ async def update_note(
 
     Notes with ``outcome`` of ``"dead_end"`` or ``"confirmed"`` are
     locked — you must pass ``force=True`` to change them. These outcomes
-    carry weight: ``"dead_end"`` causes future agents to skip the
-    technique, and ``"confirmed"`` flags a real finding. Be certain
-    before overriding.
+    carry weight: ``"dead_end"`` records an ineffective attempt, and
+    ``"confirmed"`` records a verified result. Check the conditions
+    before relying on or overriding them.
 
     Args:
         note_id: Target note's 12-char ID.
@@ -613,6 +676,7 @@ async def update_note(
             tags=tags,
             outcome=outcome,
             force=force,
+            store=notes_store_from_context(ctx.context),
         ),
         ensure_ascii=False,
         default=str,
@@ -627,26 +691,24 @@ async def add_learning(
     outcome: str,
     tags: list[str] | None = None,
 ) -> str:
-    """Record what you tried and what happened — shared memory across runs.
+    """Record an attempt and its outcome in your notes.
 
-    This is the primary way to add to the agent memory system. Call it
-    after any non-trivial attempt so future agents (in this run AND
-    future scans against the same target) don't repeat wasted work.
+    Call this after a non-trivial attempt so you can refer to it later.
 
     Before attempting a technique, search for it first:
-    ``list_notes(category="learnings", search="<technique>")`` — a
-    ``"dead_end"`` outcome means skip it.
+    ``list_notes(category="learnings", search="<technique>")``.
+    Skip a ``"dead_end"`` only when its conditions still match this task.
 
     Outcome values:
-    - ``"dead_end"`` — tried, definitively doesn't work. Future agents
-      skip this. Be certain before using — it blocks future attempts.
+    - ``"dead_end"`` — proved ineffective under the recorded conditions.
     - ``"promising"`` — partial signal, needs more investigation.
     - ``"confirmed"`` — works / vulnerability confirmed. Also locked.
     - ``"unknown"``  — inconclusive result.
 
-    Learnings are visible to all agents in this run and are persisted
-    to ``~/.kael/memory/<target-slug>/learnings.json`` so they survive
-    across separate scans of the same target.
+    Learnings are private to you in this session by default and saved
+    for resume. Session scope explicitly shares them within this run;
+    target scope also shares them across scans of the same exact targets.
+    Check that prior conditions still apply before relying on a learning.
 
     Args:
         technique: Short slug for what was attempted, e.g.
@@ -663,6 +725,7 @@ async def add_learning(
             category="learnings",
             tags=tags,
             outcome=outcome,
+            store=notes_store_from_context(ctx.context),
         ),
         ensure_ascii=False,
         default=str,
@@ -671,11 +734,15 @@ async def add_learning(
 
 @function_tool(timeout=30)
 async def delete_note(ctx: RunContextWrapper, note_id: str) -> str:
-    """Delete a note.
+    """Delete an accessible note, by default only your own in this session.
 
     Args:
         note_id: Note id to delete.
     """
     return json.dumps(
-        await asyncio.to_thread(_delete_note_impl, note_id), ensure_ascii=False, default=str
+        await asyncio.to_thread(
+            _delete_note_impl, note_id, store=notes_store_from_context(ctx.context)
+        ),
+        ensure_ascii=False,
+        default=str,
     )

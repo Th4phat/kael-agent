@@ -165,6 +165,69 @@ class TestWrapFunctionTool:
         result = _run(wrapped.on_invoke_tool(MagicMock(), "{}"))
         assert result == "ok result"
 
+    def test_repeated_invalid_shell_json_requests_recovery(self) -> None:
+        from agents.tool import FunctionTool
+        from pydantic import BaseModel
+
+        from kael.agents.factory import (
+            RepeatedInvalidToolArguments,
+            _configure_shell_tools,
+        )
+
+        class Args(BaseModel):
+            session_id: int
+            chars: str = ""
+
+        async def invoke(_ctx, raw):
+            Args.model_validate_json(raw)
+            return "ok"
+
+        shell = MagicMock()
+        shell.write_stdin = FunctionTool(
+            name="write_stdin",
+            description="Write to a running process",
+            params_json_schema=Args.model_json_schema(),
+            on_invoke_tool=invoke,
+            strict_json_schema=False,
+        )
+        _configure_shell_tools(shell, chat_completions=True)
+        ctx = MagicMock(context={})
+        bad = '{"session_id":49984,"chars":'
+
+        first = _run(shell.write_stdin.on_invoke_tool(ctx, bad))
+        assert "Invalid JSON" in first
+        assert "interrupt=true" in first
+        with pytest.raises(RepeatedInvalidToolArguments):
+            _run(shell.write_stdin.on_invoke_tool(ctx, bad))
+
+        assert _run(shell.write_stdin.on_invoke_tool(ctx, '{"session_id":49984}')) == "ok"
+        assert shell.write_stdin.params_json_schema["properties"]["interrupt"]["type"] == "boolean"
+
+    def test_write_stdin_interrupt_sends_ctrl_c(self) -> None:
+        from types import SimpleNamespace
+
+        from agents.sandbox.capabilities.tools.shell_tool import WriteStdinTool
+
+        from kael.agents.factory import _configure_shell_tools
+
+        session = MagicMock()
+        session.supports_pty.return_value = True
+        session.pty_write_stdin = AsyncMock(
+            return_value=SimpleNamespace(
+                output=b"", exit_code=None, process_id=49984, original_token_count=None
+            )
+        )
+        shell = SimpleNamespace(write_stdin=WriteStdinTool(session=session))
+        _configure_shell_tools(shell, chat_completions=True)
+
+        _run(
+            shell.write_stdin.on_invoke_tool(
+                MagicMock(context={}), '{"session_id":49984,"interrupt":true}'
+            )
+        )
+
+        assert session.pty_write_stdin.await_args.kwargs["chars"] == "\x03"
+
 
 class TestFormatToolError:
     def test_uses_str_when_available(self) -> None:

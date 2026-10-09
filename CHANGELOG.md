@@ -5,6 +5,25 @@ Kael uses [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ## [Unreleased]
 
+### Added
+
+- TUI: command palette (`ctrl+p`) with agent switching, folding, copy and
+  theme selection; native header/footer with visible key bindings; model
+  reasoning shown as a folded "thinking" block; per-agent unread badges;
+  "new messages" indicator when scrolled up; `ctrl+j` newline (works in
+  every terminal); `ctrl+o` fold/unfold tool output; `ctrl+↑/↓` agent cycling.
+- TUI: `kael` Textual theme; every built-in Textual theme can be selected.
+- `KAEL_REASONING_EFFORT` now applies to custom OpenAI-compatible endpoints.
+
+### Changed
+
+- TUI rendering is push-based (one widget per event, real Markdown) instead of
+  re-rendering the whole transcript on a timer; streaming no longer stutters
+  and the scan thread never blocks on the UI.
+- Vulnerability detail and agent messages render with Textual's Markdown
+  widget (tables, code blocks, links).
+- `ctrl+c` copies the selection when there is one, otherwise asks to quit.
+
 ## [0.1.0] - 2026-08-29
 
 ### Added

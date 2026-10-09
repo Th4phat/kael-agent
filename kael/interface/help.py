@@ -75,6 +75,11 @@ _COMMANDS: list[tuple[str, str, str | None]] = [
         "Build the version-matched local sandbox image from this source checkout.",
         "option: --force",
     ),
+    (
+        "[bold cyan]kael[/] [bold white]demo [TOKENS_PER_SEC][/]",
+        "Try the TUI with a scripted scan stream. No Docker or LLM needed.",
+        None,
+    ),
 ]
 
 

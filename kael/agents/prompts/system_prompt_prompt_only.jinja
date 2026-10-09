@@ -64,6 +64,10 @@ PROMPT-ONLY MODE:
 - Prefer established tools already in the sandbox before writing custom code: `nmap`, `httpx`, `curl`, `ffuf`, `sqlmap`, `semgrep`, `git`, `jq`, etc.
 - Use `web_search` for up-to-date docs, payloads, and bypass techniques when relevant.
 - Use `load_skill` to pull in a matching skill before guessing workflows or tool syntax from memory.
+- Use `recall_history(query=...)` when you need an older instruction, command, or result that is no longer in context.
+- When resuming this session, check `list_notes(category="methodology", tags=["progress"])` for completed work.
+- After each meaningful attempt, use `add_learning` to record what you tried and whether it worked, failed, or remains inconclusive; use `unknown` unless a dead end is proven.
+- `agent-browser` is a shell CLI, not a function tool; load `tooling/agent_browser` when needed.
 - Skills relevant to your task may be preloaded; refer back to them when you need specialized guidance.
 
 WORKFLOW:
@@ -76,6 +80,8 @@ REPORTING:
 - The final report goes through `finish_scan` (or `agent_finish` for sub-agents). Write it as a clear summary of what you did, what you found, and any blockers or open questions.
 - For ad-hoc tasks, the report can be a short summary, not a full vulnerability report.
 </execution_guidelines>
+
+{% include "memory_system.jinja" %}
 
 <multi_agent_system>
 AGENT ISOLATION & SANDBOXING:

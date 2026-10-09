@@ -53,6 +53,11 @@ export KAEL_RUNTIME_BACKEND=podman
 export KAEL_CONTAINER_SOCKET="/run/user/$(id -u)/podman/podman.sock"
 ```
 
+Rootless Podman copies the host's `/etc/resolv.conf` into the sandbox. If your
+host resolvers aren't reachable from the container (common with Tailscale or
+VPN-managed DNS), every proxied request fails with `502 Bad Gateway`; pin the
+sandbox resolvers with `export KAEL_SANDBOX_DNS=1.1.1.1,8.8.8.8`.
+
 On first use, Kael asks before building the versioned local sandbox image. The
 build downloads a Kali base image and security tools, so it can take a while and
 consume several gigabytes.
@@ -108,9 +113,17 @@ and can include Markdown, CSV, JSON, and SARIF output.
 
 Configuration precedence is:
 
-1. Environment variables
-2. `.env` in the working directory
-3. `~/.kael/cli-config.json`
+1. The selected JSON config file, defaulting to `~/.kael/cli-config.json`
+2. Environment variables for settings absent from the file
+3. Built-in defaults
+
+Press **F8** in the TUI to configure the model, OpenRouter provider, API keys,
+runtime, and tools. **F6** selects provider routing and **F7** selects the model
+in the same editor. **Save** or **Ctrl+S** writes the active config file. Select
+a different file with `kael <target> config /path/to/config.json`.
+
+When no config exists, Kael imports the working directory's `.env` once.
+Subsequent launches use the JSON file, so `.env` is no longer needed.
 
 Common settings:
 
@@ -122,6 +135,7 @@ Common settings:
 | `KAEL_IMAGE` | Custom sandbox image; defaults to `kael-sandbox:0.1.0` |
 | `KAEL_RUNTIME_BACKEND` | Runtime backend: `docker` (default) or `podman` |
 | `KAEL_CONTAINER_SOCKET` | Optional path to a Docker-compatible API socket |
+| `KAEL_SANDBOX_DNS` | Comma-separated nameservers for the sandbox (e.g. `1.1.1.1,8.8.8.8`); set this if the sandbox proxy returns 502 for everything |
 | `KAEL_AUTO_BUILD_SANDBOX` | Allow missing-image builds in non-interactive runs |
 
 Never commit credentials. See [BUILDING.md](BUILDING.md) for development and

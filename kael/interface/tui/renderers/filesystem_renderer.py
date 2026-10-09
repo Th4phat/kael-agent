@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
-from functools import cache
 from typing import Any, ClassVar
 
 from pygments.lexers import get_lexer_by_name, get_lexer_for_filename
-from pygments.styles import get_style_by_name
 from pygments.util import ClassNotFound
 from rich.text import Text
 from textual.widgets import Static
 
-from .base_renderer import BaseToolRenderer
+from .base_renderer import BaseToolRenderer, highlight
 from .registry import register_tool_renderer
 
 
@@ -28,12 +26,6 @@ _VIEW_IMAGE_ERROR_PREFIXES = (
 )
 
 
-@cache
-def _get_style_colors() -> dict[Any, str]:
-    style = get_style_by_name("native")
-    return {token: f"#{style_def['color']}" for token, style_def in style if style_def["color"]}
-
-
 def _get_lexer_for_file(path: str) -> Any:
     try:
         return get_lexer_for_filename(path)
@@ -41,24 +33,8 @@ def _get_lexer_for_file(path: str) -> Any:
         return get_lexer_by_name("text")
 
 
-def _get_token_color(token_type: Any) -> str | None:
-    colors = _get_style_colors()
-    while token_type:
-        if token_type in colors:
-            return colors[token_type]
-        token_type = token_type.parent
-    return None
-
-
 def _highlight_code(code: str, path: str) -> Text:
-    lexer = _get_lexer_for_file(path)
-    text = Text()
-    for token_type, token_value in lexer.get_tokens(code):
-        if not token_value:
-            continue
-        color = _get_token_color(token_type)
-        text.append(token_value, style=color)
-    return text
+    return highlight(code, _get_lexer_for_file(path))
 
 
 def _extract_patch_text(args: dict[str, Any]) -> str:

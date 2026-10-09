@@ -39,6 +39,8 @@ from docker import errors as docker_errors  # type: ignore[import-untyped, unuse
 from docker.models.containers import Container  # type: ignore[import-untyped, unused-ignore]
 from docker.utils import parse_repository_tag  # type: ignore[import-untyped, unused-ignore]
 
+from kael.config import load_settings
+
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,14 @@ class KaelDockerSandboxClient(DockerSandboxClient):
 
         extra_hosts = create_kwargs.setdefault("extra_hosts", {})
         extra_hosts["host.docker.internal"] = "host-gateway"
+
+        # Rootless Podman prepends slirp4netns's 10.0.2.3 to the host's
+        # resolv.conf; with unreachable host resolvers ahead of the working
+        # one, glibc's 3-nameserver limit leaves the sandbox unable to
+        # resolve anything and mitmproxy answers every request with 502.
+        dns_setting = load_settings().runtime.sandbox_dns or ""
+        if dns := [d.strip() for d in dns_setting.split(",") if d.strip()]:
+            create_kwargs["dns"] = dns
 
         # Malware RE hardening: drop all capabilities except NET_ADMIN/NET_RAW/SYS_ADMIN
         # Check if this is a malware_re session by looking at manifest environment

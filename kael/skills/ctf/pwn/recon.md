@@ -106,6 +106,10 @@ libc = elf.libc                    # auto-loads matching libc
 
 def conn():
     if args.REMOTE:
+        # If the target is only given as ws:// / wss:// (no raw host:port),
+        # bridge it first: load_skill(["wsrx"]) →
+        #   wsrx connect --host 127.0.0.1 --port 13337 "wss://.../instance" &
+        # then remote('127.0.0.1', 13337) below.
         return remote('host', 1337)
     elif args.GDB:
         return gdb.debug('./chall', gdbscript='continue\n')

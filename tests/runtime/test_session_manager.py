@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from agents.sandbox.entries import LocalDir, LocalFile
 
 from kael.runtime import session_manager
 from kael.runtime.session_manager import _wait_for_entrypoint
@@ -38,6 +40,7 @@ async def test_wait_for_entrypoint_reports_timeout() -> None:
 @pytest.mark.asyncio
 async def test_create_or_reuse_wires_mitmproxy_control(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     runtime_client = SimpleNamespace(delete=AsyncMock())
     sandbox_session = SimpleNamespace(
@@ -59,17 +62,36 @@ async def test_create_or_reuse_wires_mitmproxy_control(
     monkeypatch.setattr(session_manager, "bootstrap_mitmproxy", bootstrap)
     monkeypatch.setattr(session_manager, "load_settings", lambda: settings)
     session_manager._SESSION_CACHE.clear()
+    archive = tmp_path / "LastWord.zip"
+    archive.write_bytes(b"archive contents")
+    source = tmp_path / "source"
+    source.mkdir()
 
     bundle = await session_manager.create_or_reuse(
         "mitm-wiring-test",
         image="kael-sandbox:test",
-        local_sources=[],
+        local_sources=[
+            {
+                "source_path": str(archive),
+                "workspace_subdir": archive.name,
+                "is_file": True,
+            },
+            {"source_path": str(source), "workspace_subdir": source.name},
+        ],
     )
 
     assert bundle["mitm_client"] is mitm_client
     call = create_session.await_args
     assert call.kwargs["exposed_ports"] == (8081,)
-    environment = await call.kwargs["manifest"].environment.resolve()
+    manifest = call.kwargs["manifest"]
+    file_entry = manifest.entries[archive.name]
+    assert isinstance(file_entry, LocalFile)
+    assert file_entry.src == archive
+    assert file_entry.src.read_bytes() == b"archive contents"
+    directory_entry = manifest.entries[source.name]
+    assert isinstance(directory_entry, LocalDir)
+    assert directory_entry.src == source
+    environment = await manifest.environment.resolve()
     assert environment["HTTP_PROXY"] == "http://127.0.0.1:8080"
     assert environment["HTTPS_PROXY"] == "http://127.0.0.1:8080"
     assert environment["KAEL_MITM_CONTROL_URL"] == "http://127.0.0.1:8081"

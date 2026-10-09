@@ -18,6 +18,7 @@ import httpx
 import pytest
 from agents.exceptions import ModelBehaviorError
 
+from kael.agents.factory import RepeatedInvalidToolArguments
 from kael.core.agents import AgentCoordinator
 from kael.core.execution import (
     _MODEL_BEHAVIOR_RETRY_LIMIT,
@@ -366,6 +367,44 @@ async def test_run_cycle_recovers_from_agent_browser_hallucination(
     correction = session.add_items.call_args.args[0][0]
     assert "agent_browser_close" in correction["content"]
     assert "agent-browser close" in correction["content"]
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_recovers_from_repeated_invalid_tool_json() -> None:
+    coord = AgentCoordinator()
+    await coord.register("a1", "alpha", parent_id=None)
+    session = MagicMock()
+    session.add_items = AsyncMock()
+    calls = 0
+
+    def fake_run_streamed(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _make_failing_stream(RepeatedInvalidToolArguments("write_stdin"))
+        return _make_succeeding_stream()
+
+    with patch("kael.core.execution.Runner.run_streamed", side_effect=fake_run_streamed):
+        result = await _run_cycle(
+            agent=MagicMock(),
+            coordinator=coord,
+            agent_id="a1",
+            input_data=[],
+            run_config=MagicMock(),
+            context={"parent_id": None},
+            max_turns=10,
+            session=session,
+            interactive=False,
+            event_sink=None,
+            hooks=None,
+        )
+
+    assert result is not None
+    assert calls == 2
+    message = session.add_items.call_args.args[0][0]["content"]
+    assert "complete JSON" in message
+    assert "<tool_call>" in message
+    assert '"interrupt":true' in message
 
 
 @pytest.mark.asyncio

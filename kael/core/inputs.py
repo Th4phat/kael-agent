@@ -6,9 +6,14 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from agents.model_settings import ModelSettings
+from agents.run_config import CallModelData, ModelInputData
 from openai.types.shared import Reasoning
 
-from kael.config.models import DEFAULT_MODEL_RETRY, model_supports_reasoning
+from kael.config.models import (
+    DEFAULT_MODEL_RETRY,
+    model_supports_reasoning,
+    openrouter_extra_body,
+)
 
 
 if TYPE_CHECKING:
@@ -16,6 +21,79 @@ if TYPE_CHECKING:
 
 
 DEFAULT_MAX_TURNS = 500
+_MAX_HISTORY_CHARS = 60_000
+_MAX_TOOL_OUTPUT_CHARS = 8_000
+# ponytail: character limits approximate tokens; use model-specific counting if needed.
+
+
+def limit_model_input(data: CallModelData[Any]) -> ModelInputData:
+    """Bound replayed history on every model call, including long single runs."""
+    items = data.model_data.input
+    trimmed = []
+    for item in items:
+        if isinstance(item, dict) and item.get("type") == "function_call_output":
+            output = item.get("output")
+            if isinstance(output, str) and len(output) > _MAX_TOOL_OUTPUT_CHARS:
+                item = {
+                    **item,
+                    "output": (
+                        output[:6_000]
+                        + f"\n[output truncated: {len(output)} characters; inspect the saved artifact or rerun a narrower query]\n"
+                        + output[-2_000:]
+                    ),
+                }
+        trimmed.append(item)
+
+    def size(item: Any) -> int:
+        return len(json.dumps(item, default=str))
+
+    if sum(map(size, trimmed)) <= _MAX_HISTORY_CHARS:
+        return ModelInputData(input=trimmed, instructions=data.model_data.instructions)
+
+    first = []
+    start = 0
+    if trimmed and isinstance(trimmed[0], dict) and trimmed[0].get("role") == "user":
+        # Older child sessions stored the entire parent history in item 0.
+        # Keep the child's own task (item 2) when that legacy preamble is huge.
+        inherited = str(trimmed[0].get("content", "")).startswith(
+            "== Inherited context from parent"
+        )
+        if inherited and len(trimmed) > 2:
+            first, start = [trimmed[2]], 3
+        else:
+            first, start = trimmed[:1], 1
+    for index in range(len(trimmed) - 1, start - 1, -1):
+        if isinstance(trimmed[index], dict) and trimmed[index].get("role") == "user":
+            first.append(trimmed[index])
+            start = index + 1
+            break
+    budget = _MAX_HISTORY_CHARS - sum(map(size, first))
+    recent = []
+    for item in reversed(trimmed[start:]):
+        item_size = size(item)
+        if recent and item_size > budget:
+            break
+        recent.append(item)
+        budget -= item_size
+    recent.reverse()
+
+    # A suffix can begin between a tool call and its result. Drop orphaned
+    # results so the Responses API receives valid call/output pairs.
+    call_ids = {
+        item.get("call_id")
+        for item in recent
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    }
+    recent = [
+        item
+        for item in recent
+        if not (
+            isinstance(item, dict)
+            and item.get("type") == "function_call_output"
+            and item.get("call_id") not in call_ids
+        )
+    ]
+    return ModelInputData(input=[*first, *recent], instructions=data.model_data.instructions)
 
 
 def build_root_task(scan_config: dict[str, Any]) -> str:
@@ -151,6 +229,7 @@ def make_model_settings(
     model_name: str,
     parallel_tool_calls_mode: str = "off",
     openrouter_provider: dict[str, Any] | None = None,
+    api_base: str | None = None,
 ) -> ModelSettings:
     # Parallel tool calls are opt-in (default "off") to keep the
     # previous hard-coded sequential behavior. "safe" enables parallel
@@ -159,19 +238,20 @@ def make_model_settings(
     # parallel" to our hooks, so the "safe" claim is best-effort
     # (telemetry warns on repeat non-safe calls in a turn).
     parallel = parallel_tool_calls_mode in ("safe", "all")
-    extra_body: dict[str, Any] | None = None
-    if openrouter_provider and "openrouter" in model_name.lower():
-        extra_body = {"provider": openrouter_provider}
     model_settings = ModelSettings(
         parallel_tool_calls=parallel,
         retry=DEFAULT_MODEL_RETRY,
         include_usage=True,
-        extra_body=extra_body,
+        extra_body=openrouter_extra_body(model_name, openrouter_provider, api_base),
     )
+    # Custom OpenAI-compatible endpoints (LLM_API_BASE) aren't in litellm's
+    # model registry, so model_supports_reasoning() can't see them. `reasoning_effort`
+    # is the OpenAI-compatible thinking param, so send it whenever a custom
+    # base URL is configured — the user chose that endpoint deliberately.
     if (
         reasoning_effort is not None
         and reasoning_effort != "none"
-        and model_supports_reasoning(model_name)
+        and (api_base is not None or model_supports_reasoning(model_name))
     ):
         model_settings = model_settings.resolve(
             ModelSettings(reasoning=Reasoning(effort=reasoning_effort)),
@@ -190,6 +270,8 @@ def child_initial_input(
     initial_input: list[dict[str, Any]] = []
     if parent_history:
         rendered = json.dumps(parent_history, ensure_ascii=False, default=str)
+        if len(rendered) > 8_000:
+            rendered = "[Earlier parent context omitted] ..." + rendered[-8_000:]
         initial_input.append(
             {
                 "role": "user",

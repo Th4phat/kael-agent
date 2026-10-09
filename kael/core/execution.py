@@ -17,6 +17,7 @@ from agents.sandbox.errors import ExecTransportError
 from docker import errors as docker_errors  # type: ignore[import-untyped, unused-ignore]
 from openai import APIConnectionError, APIError, APITimeoutError
 
+from kael.agents.factory import RepeatedInvalidToolArguments
 from kael.core.inputs import child_initial_input
 from kael.core.sessions import open_agent_session, strip_all_images_from_session
 
@@ -494,6 +495,29 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                 input_data = []
                 continue
             hallucinated_tool = _is_cli_tool_hallucination(exc)
+            if (
+                isinstance(exc, RepeatedInvalidToolArguments)
+                and model_behavior_retries < _MODEL_BEHAVIOR_RETRY_LIMIT
+            ):
+                model_behavior_retries += 1
+                message = (
+                    f"Your calls to {exc.tool_name} contained incomplete JSON. "
+                    "Use the actual function tool with one complete JSON object; do not "
+                    "write <tool_call> markup in message text. For Ctrl+C, call "
+                    'write_stdin with {"session_id":123,"interrupt":true}, '
+                    "replacing 123 with the running session ID. Use recall_history "
+                    "if you need an earlier result, then continue the task."
+                )
+                item = {"role": "user", "content": message}
+                if session is not None:
+                    await session.add_items([cast("TResponseInputItem", item)])
+                    input_data = []
+                else:
+                    input_data = [item]
+                logger.warning(
+                    "Correcting repeated malformed %s calls for %s", exc.tool_name, agent_id
+                )
+                continue
             if (
                 hallucinated_tool is not None
                 and model_behavior_retries < _MODEL_BEHAVIOR_RETRY_LIMIT

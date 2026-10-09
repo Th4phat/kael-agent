@@ -18,8 +18,10 @@ Install contributor hooks with:
 make setup-dev
 ```
 
-Kael reads provider settings from environment variables, a local `.env`, or
-`~/.kael/cli-config.json`. Never commit credentials.
+Kael stores settings in `~/.kael/cli-config.json`. Configure provider, model,
+and credentials with **F8** in the TUI. Environment variables supply settings
+absent from the config. If no config exists, a local `.env` is imported once.
+Never commit credentials.
 
 ## Build the sandbox
 

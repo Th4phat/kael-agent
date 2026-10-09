@@ -93,7 +93,10 @@ schema.graphql
 # Local workspace-only tooling and analysis artifacts
 /AGENTS.md
 /.codex/
+/.kilo/
 /agent-browser/
 /graphify-out/
 /Unknown.Traffic.pcap
 /sample_helper
+/Last_Word.zip
+/docs/research/

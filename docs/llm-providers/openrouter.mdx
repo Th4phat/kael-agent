@@ -7,10 +7,52 @@ description: "Configure Kael with models via OpenRouter"
 
 ## Setup
 
+Open **Settings** with `F8`, set `KAEL_LLM` to your OpenRouter model identifier,
+set `LLM_API_KEY` to your API key, and choose **Save**. Kael stores these in
+`~/.kael/cli-config.json`, or the file selected with `config <PATH>`.
+
+Environment variables are also accepted for settings absent from the file:
+
 ```bash
 export KAEL_LLM="openrouter/openai/gpt-5.4"
 export LLM_API_KEY="sk-or-..."
 ```
+
+## Choose a Provider
+
+In the TUI, press `F6` or choose **Change OpenRouter provider** from the
+`ctrl+p` command palette. This selects `KAEL_OPENROUTER_PROVIDER` in Settings.
+Enter a provider slug and select **Save**, or press `Ctrl+S`.
+Leave the field empty to restore automatic routing. Changes affect the next
+request from all agents, including report and vision calls, and persist for
+future launches. Requests already in progress finish with their original routing.
+The setting also accepts the JSON routing options shown below. Use `F7` to
+change the model, or `F8` to configure model, provider, credentials, and tools
+together.
+
+Set `KAEL_OPENROUTER_PROVIDER` to an OpenRouter provider slug:
+
+```bash
+export KAEL_OPENROUTER_PROVIDER="openai"
+```
+
+Kael sends `provider: {"only": ["openai"]}` with OpenRouter requests,
+including startup checks, agents, report comparisons, and vision calls.
+The selected provider must serve your model; requests fail if it is unavailable.
+You can also edit this setting directly in your JSON config file.
+Clear it in Settings to use OpenRouter's default routing.
+
+For a model served by several providers, you can set an ordered preference
+list that permits other providers as fallbacks using a JSON object:
+
+```bash
+export KAEL_OPENROUTER_PROVIDER='{"order":["deepinfra","together"]}'
+```
+
+Use `{"only":["deepinfra","together"]}` to restrict requests to those providers.
+See [OpenRouter provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
+for provider slugs and additional options. Routing applies to `openrouter/...`
+models and to OpenAI-compatible requests using `https://openrouter.ai/api/v1`.
 
 ## Example Models
 

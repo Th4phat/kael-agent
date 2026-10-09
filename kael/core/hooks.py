@@ -16,7 +16,7 @@ from kael.report.state import get_global_report_state
 if TYPE_CHECKING:
     from agents import RunContextWrapper
     from agents.agent import Agent
-    from agents.items import ModelResponse
+    from agents.items import ModelResponse, TResponseInputItem
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,20 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
 
     def __init__(self, *, model: str) -> None:
         self._model = model
+        self._request_models: dict[int, str] = {}
+
+    async def on_llm_start(
+        self,
+        context: RunContextWrapper[dict[str, Any]],
+        agent: Agent[dict[str, Any]],
+        system_prompt: str | None,
+        input_items: list[TResponseInputItem],
+    ) -> None:
+        ctx = context.context if isinstance(context.context, dict) else {}
+        coordinator = ctx.get("coordinator")
+        config = getattr(coordinator, "run_config", None)
+        model = getattr(config, "model", None)
+        self._request_models[id(context)] = model if isinstance(model, str) else self._model
 
     async def on_llm_end(
         self,
@@ -34,6 +48,7 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         agent: Agent[dict[str, Any]],
         response: ModelResponse,
     ) -> None:
+        model = self._request_models.pop(id(context), self._model)
         report_state = get_global_report_state()
         if report_state is None:
             return
@@ -50,7 +65,7 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
             report_state.record_sdk_usage(
                 agent_id=agent_id,
                 agent_name=agent_name,
-                model=self._model,
+                model=model,
                 usage=response.usage,
             )
         except Exception:

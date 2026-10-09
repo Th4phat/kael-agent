@@ -6,13 +6,14 @@ Public surface:
 - :class:`LlmSettings`, :class:`RuntimeSettings`,
   :class:`IntegrationSettings` — sub-models, attribute-accessed off
   ``Settings``.
-- :func:`load_settings` — memoized resolve (env > .env > JSON file > defaults).
+- :func:`load_settings` — memoized resolve (JSON file > env > defaults).
 - :func:`apply_config_override` — switch the JSON source to a custom path.
-- :func:`persist_current` — write currently-set env vars to the active file.
+- :func:`persist_current` — write explicitly configured settings to the active file.
 """
 
 from kael.config.loader import (
     apply_config_override,
+    config_path,
     load_settings,
     persist_current,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "RuntimeSettings",
     "Settings",
     "apply_config_override",
+    "config_path",
     "load_settings",
     "persist_current",
 ]

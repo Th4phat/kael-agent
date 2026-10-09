@@ -44,21 +44,15 @@ def _resolve_skills(
 
     1. Whatever the caller asked for, in order.
     2. ``scan_modes/<mode>`` (always).
-    3. ``tooling/agent_browser`` (always — every agent has shell + the
-       agent-browser CLI).
-    4. ``tooling/agent_browser_vercel_sandbox`` when ``BROWSER_BACKEND=vercel-sandbox``.
-    5. ``tooling/python`` (always — Python runs through ``exec_command``;
-       sandbox scripts can import ``mitm_control`` for proxy automation).
-    6. ``coordination/root_agent`` for the root agent only — orchestration
+    3. Vercel browser guidance when ``BROWSER_BACKEND=vercel-sandbox``.
+    4. ``coordination/root_agent`` for the root agent only — orchestration
        guidance for delegating to specialist subagents.
-    7. Whitebox-specific skills if applicable.
+    5. Whitebox-specific skills if applicable.
     """
     ordered: list[str] = list(requested or [])
     ordered.append(f"scan_modes/{scan_mode}")
-    ordered.append("tooling/agent_browser")
     if browser_backend == "vercel-sandbox":
         ordered.append("tooling/agent_browser_vercel_sandbox")
-    ordered.append("tooling/python")
     if is_root:
         ordered.append("coordination/root_agent")
     if is_whitebox:

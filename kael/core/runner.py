@@ -32,9 +32,10 @@ from kael.core.inputs import (
     DEFAULT_MAX_TURNS,
     build_root_task,
     build_scope_context,
+    limit_model_input,
     make_model_settings,
 )
-from kael.core.paths import memory_dir_for, run_dir_for, runtime_state_dir, target_slug
+from kael.core.paths import run_dir_for, runtime_state_dir
 from kael.core.sessions import open_agent_session
 from kael.log_utils import set_scan_id, setup_scan_logging
 from kael.runtime import session_manager
@@ -89,29 +90,25 @@ async def run_kael_scan(
     )
 
     settings = load_settings()
-    configure_sdk_model_defaults(settings)
     resolved_model = (model or settings.llm.model or "").strip()
     if not resolved_model:
         raise RuntimeError(
             "No LLM model configured. Set KAEL_LLM env or pass model= to run_kael_scan().",
         )
-    logger.info("LLM model resolved: %s", resolved_model)
-    chat_completions_tools = uses_chat_completions_tool_schema(resolved_model, settings)
 
     if coordinator is None:
         coordinator = AgentCoordinator()
     coordinator.set_snapshot_path(agents_path)
 
-    from kael.tools.notes.tools import hydrate_learnings_from_memory, hydrate_notes_from_disk
+    from kael.tools.notes.tools import hydrate_notes_from_disk
     from kael.tools.todo.tools import hydrate_todos_from_disk
 
     hydrate_todos_from_disk(state_dir)
-    hydrate_notes_from_disk(state_dir)
-
-    target_list = scan_config.get("targets") or []
-    if target_list:
-        slug = target_slug(target_list)
-        hydrate_learnings_from_memory(memory_dir_for(slug))
+    notes_store = hydrate_notes_from_disk(
+        state_dir,
+        targets=scan_config.get("targets") or [],
+        scope=settings.memory.scope,
+    )
 
     root_id: str | None = None
     if is_resume:
@@ -153,6 +150,13 @@ async def run_kael_scan(
     sessions_to_close: list[SQLiteSession] = []
 
     try:
+        settings = load_settings()
+        resolved_model = (model or settings.llm.model or "").strip()
+        if not resolved_model:
+            raise RuntimeError("No LLM model configured. Choose a model before starting the scan.")
+        configure_sdk_model_defaults(settings)
+        logger.info("LLM model resolved: %s", resolved_model)
+        chat_completions_tools = uses_chat_completions_tool_schema(resolved_model, settings)
         targets = scan_config.get("targets") or []
         scan_mode = str(scan_config.get("scan_mode") or "deep")
         is_whitebox = any(t.get("type") == "local_code" for t in targets)
@@ -164,20 +168,27 @@ async def run_kael_scan(
             model_name=resolved_model,
             parallel_tool_calls_mode=settings.tool_harness.parallel_tool_calls_mode,
             openrouter_provider=settings.llm.openrouter_provider,
+            api_base=settings.llm.api_base,
         )
+        model_settings.extra_args = {"timeout": settings.llm.timeout}
         run_config = RunConfig(
             model=resolved_model,
             model_provider=KaelProvider(),
             model_settings=model_settings,
+            call_model_input_filter=limit_model_input,
             sandbox=SandboxRunConfig(client=bundle["client"], session=bundle["session"]),
             trace_include_sensitive_data=False,
         )
+        coordinator.run_config = run_config
+        coordinator.model_uses_chat_completions = chat_completions_tools
+        coordinator.model_api_base = settings.llm.api_base
         hooks = KaelRunHooks(
             model=resolved_model,
             dedup_window_turns=settings.tool_harness.dedup_window_turns,
         )
 
         scope_context = build_scope_context(scan_config)
+        scope_context["notes_scope"] = notes_store.scope
 
         root_agent = build_kael_agent(
             name="kael",
@@ -231,6 +242,7 @@ async def run_kael_scan(
             "parent_id": None,
             "interactive": interactive,
             "spawn_child_agent": spawn_child_agent,
+            "notes_store": notes_store,
         }
 
         root_session = open_agent_session(root_id, agents_db)
@@ -321,6 +333,9 @@ async def run_kael_scan(
                 await coordinator.set_status(root_id, "failed")
         raise
     finally:
+        coordinator.run_config = None
+        coordinator.model_uses_chat_completions = None
+        coordinator.model_api_base = None
         for s in sessions_to_close:
             with contextlib.suppress(Exception):
                 s.close()

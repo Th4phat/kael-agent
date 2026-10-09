@@ -137,6 +137,21 @@ RUN set -eux; \
     install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks; \
     rm -f /tmp/gitleaks /tmp/gitleaks.tgz
 
+# wsrx (WebSocketReflectorX) — tunnels raw TCP over a WebSocket, for CTF
+# challenges reachable only through a ws:// / wss:// gateway. Upstream ships a
+# Linux CLI for x86_64 only (static musl); skip cleanly on other arches.
+ARG WSRX_VERSION=0.6.1
+RUN set -eux; \
+    if [ "$(uname -m)" = "x86_64" ]; then \
+        curl -fsSL "https://github.com/XDSEC/WebSocketReflectorX/releases/download/${WSRX_VERSION}/wsrx-cli-${WSRX_VERSION}-linux-musl-x86_64.tar.gz" -o /tmp/wsrx.tgz; \
+        tar -xzf /tmp/wsrx.tgz -C /usr/local/bin wsrx; \
+        chmod +x /usr/local/bin/wsrx; \
+        rm -f /tmp/wsrx.tgz; \
+        wsrx --version; \
+    else \
+        echo "wsrx: no upstream Linux CLI for $(uname -m); skipping"; \
+    fi
+
 RUN apt-get update && apt-get install -y zaproxy
 
 RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin

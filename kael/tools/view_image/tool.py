@@ -49,6 +49,7 @@ from kael.config.models import (
     DEFAULT_MODEL_RETRY,
     KaelProvider,
     configure_sdk_model_defaults,
+    openrouter_extra_body,
 )
 from kael.report.state import get_global_report_state
 
@@ -167,7 +168,12 @@ async def _analyze_image(*, data_url: str, prompt: str, display_path: str) -> st
     else:
         model = KaelProvider().get_model(model_name)
 
-    extra_body = _vision_extra_body(model_name, settings.llm.openrouter_provider)
+    api_base = (
+        settings.llm.vision_api_base or settings.llm.api_base
+        if vision_model
+        else settings.llm.api_base
+    )
+    extra_body = openrouter_extra_body(model_name, settings.llm.openrouter_provider, api_base)
 
     input_items: list[dict[str, Any]] = [
         {
@@ -244,14 +250,6 @@ def _build_vision_model(
         return OpenAIChatCompletionsModel(model=vision_model, openai_client=client)
 
     return LitellmModel(model=vision_model, api_key=api_key, base_url=base_url)
-
-
-def _vision_extra_body(
-    model_name: str, openrouter_provider: dict[str, Any] | None
-) -> dict[str, Any] | None:
-    if openrouter_provider and "openrouter" in model_name.lower():
-        return {"provider": openrouter_provider}
-    return None
 
 
 def _extract_text(response: ModelResponse) -> str:

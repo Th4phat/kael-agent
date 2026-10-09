@@ -128,3 +128,26 @@ class TestCoordinatorStatusOps:
         active_ids = {a["agent_id"] for a in active}
         assert "child1" not in active_ids
         assert "child2" in active_ids
+
+
+class TestCoordinatorOnChange:
+    """``on_change`` fires synchronously after every graph mutation (the TUI
+    uses it instead of polling ``graph_snapshot``), with or without a
+    snapshot path configured."""
+
+    @pytest.mark.asyncio
+    async def test_fires_on_register_and_set_status(self) -> None:
+        c = AgentCoordinator()
+        calls: list[dict[str, str]] = []
+        c.on_change = lambda: calls.append(dict(c.statuses))
+
+        await c.register("a1", "kael", parent_id=None, task="t")
+        await c.set_status("a1", "completed")
+
+        assert calls == [{"a1": "running"}, {"a1": "completed"}]
+
+    @pytest.mark.asyncio
+    async def test_no_callback_is_fine(self) -> None:
+        c = AgentCoordinator()
+        await c.register("a1", "kael", parent_id=None, task="t")
+        assert c.statuses["a1"] == "running"

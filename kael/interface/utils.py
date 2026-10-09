@@ -361,20 +361,17 @@ def build_tui_stats_text(report_state: Any) -> Text:
     if not report_state:
         return stats_text
 
+    # No explicit colours: the widget's theme styling applies.
     model = load_settings().llm.model or "unknown"
-    stats_text.append(str(model), style="white")
+    stats_text.append(str(model))
 
     usage = _llm_usage(report_state)
     if usage and _int_stat(usage, "total_tokens") > 0:
         stats_text.append("\n")
-        stats_text.append(
-            f"{format_token_count(_int_stat(usage, 'total_tokens'))} tokens",
-            style="white",
-        )
+        stats_text.append(f"{format_token_count(_int_stat(usage, 'total_tokens'))} tokens")
         cost = _float_stat(usage, "cost")
         if cost > 0:
-            stats_text.append(" · ", style="white")
-            stats_text.append(f"${cost:.2f}", style="white")
+            stats_text.append(f" · ${cost:.2f}")
 
     return stats_text
 
