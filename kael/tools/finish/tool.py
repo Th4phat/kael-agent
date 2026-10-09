@@ -171,6 +171,29 @@ async def finish_scan(
             default=str,
         )
 
+    # Verified-completion gate (plan §78): when the host has required
+    # acceptance criteria, run the trusted check before persisting a
+    # success. A narrative-only finish cannot claim verified completion.
+    goal = coordinator.goal if coordinator is not None else None
+    if goal is not None and goal.criteria:
+        unmet = goal.unmet_ids()
+        if unmet:
+            return json.dumps(
+                {
+                    "success": False,
+                    "scan_completed": False,
+                    "goal_outcome": "incomplete",
+                    "error": (
+                        "Required acceptance criteria are not verified. Complete and "
+                        "verify them (e.g. submit and confirm the flag via the trusted "
+                        "oracle) before finishing; a narrative report is not acceptance."
+                    ),
+                    "missing_criteria": unmet,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+
     result = await asyncio.to_thread(
         _do_finish,
         parent_id=parent_id,
@@ -196,4 +219,7 @@ async def finish_scan(
         if not note.get("success"):
             logger.warning("Could not record scan result for %s: %s", me, note.get("error"))
         await coordinator.set_status(me, "completed")
+    if result.get("success") and result.get("scan_completed") and goal is not None:
+        await coordinator.mark_goal_stop("achieved", "")
+        result["goal_outcome"] = "achieved"
     return json.dumps(result, ensure_ascii=False, default=str)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -27,6 +28,7 @@ from kael.core.execution import (
 from kael.core.execution import (
     spawn_child_agent as start_child_agent,
 )
+from kael.core.goals import goal_from_scan_config
 from kael.core.hooks import KaelRunHooks
 from kael.core.inputs import (
     DEFAULT_MAX_TURNS,
@@ -49,6 +51,63 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 StreamEventSink = Callable[[str, Any], None]
+
+
+async def _budget_watchdog(
+    coordinator: AgentCoordinator,
+    root_id: str,
+    poll_seconds: float,
+) -> None:
+    """Host watchdog for the goal budget.
+
+    A hook gate only fires between calls, so a single stalled model/tool
+    call or a stuck dependency can't evade it — this polls the wall clock
+    and call counts and gracefully stops the whole subtree when any hard
+    limit is reached (plan §84).
+    """
+    try:
+        while True:
+            await asyncio.sleep(poll_seconds)
+            if await coordinator.goal_budget_exhausted():
+                logger.warning("goal budget watchdog: hard limit reached; stopping scan subtree")
+                await coordinator.mark_goal_stop("incomplete", "budget_exhausted")
+                await coordinator.cancel_descendants_graceful(root_id)
+                return
+    except asyncio.CancelledError:
+        return
+
+
+def _finalize_partial_report(goal: Any) -> None:
+    """Persist an honest partial report when the host stops a run.
+
+    The host writes this itself so a budget-exhausted actor isn't asked to
+    make another finish call after its budget expired (plan §78).
+    """
+    from kael.report.state import get_global_report_state
+
+    report_state = get_global_report_state()
+    if report_state is None:
+        logger.warning("goal stop (%s): no report state to persist a partial result", goal.stop_reason)
+        return
+    if report_state.scan_results and report_state.scan_results.get("scan_completed"):
+        return  # a verified-complete report already exists; don't overwrite it
+    unmet = goal.unmet_ids()
+    summary = (
+        f"Scan stopped before completion (outcome={goal.outcome}, reason={goal.stop_reason}). "
+        f"Model calls used: {goal.budget.consumed_model_calls}; "
+        f"tool calls used: {goal.budget.consumed_tool_calls}. "
+        + (
+            f"Unmet acceptance criteria: {', '.join(unmet)}."
+            if unmet
+            else "No required acceptance criteria were configured."
+        )
+    )
+    report_state.finalize_partial_report(
+        goal_outcome=goal.outcome,
+        stop_reason=goal.stop_reason,
+        summary=summary,
+    )
+    logger.info("Persisted partial report (outcome=%s, reason=%s)", goal.outcome, goal.stop_reason)
 
 
 async def run_kael_scan(
@@ -187,6 +246,13 @@ async def run_kael_scan(
             dedup_window_turns=settings.tool_harness.dedup_window_turns,
         )
 
+        # Attach the host-owned goal. On resume it is restored from the
+        # snapshot (preserving consumed budget + verdicts); otherwise build
+        # a fresh one from host-controlled config. Inert unless configured.
+        if coordinator.goal is None:
+            coordinator.goal = goal_from_scan_config(scan_config, settings)
+        coordinator.goal.budget.start_segment()
+
         scope_context = build_scope_context(scan_config)
         scope_context["notes_scope"] = notes_store.scope
 
@@ -290,20 +356,42 @@ async def run_kael_scan(
         async with coordinator.lock():
             root_status = coordinator.statuses.get(root_id)
 
-        result = await run_agent_loop(
-            agent=root_agent,
-            initial_input=initial_input,
-            run_config=run_config,
-            context=context,
-            max_turns=max_turns,
-            coordinator=coordinator,
-            agent_id=root_id,
-            interactive=interactive,
-            session=root_session,
-            start_parked=bool(interactive and is_resume and root_status != "running"),
-            event_sink=event_sink,
-            hooks=hooks,
-        )
+        watchdog_task: asyncio.Task[None] | None = None
+        if coordinator.goal.budget.configured():
+            watchdog_task = asyncio.create_task(
+                _budget_watchdog(coordinator, root_id, settings.goal.watchdog_poll_seconds),
+                name="goal-watchdog",
+            )
+
+        try:
+            result = await run_agent_loop(
+                agent=root_agent,
+                initial_input=initial_input,
+                run_config=run_config,
+                context=context,
+                max_turns=max_turns,
+                coordinator=coordinator,
+                agent_id=root_id,
+                interactive=interactive,
+                session=root_session,
+                start_parked=bool(interactive and is_resume and root_status != "running"),
+                event_sink=event_sink,
+                hooks=hooks,
+            )
+        finally:
+            if watchdog_task is not None:
+                watchdog_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watchdog_task
+
+        goal = coordinator.goal
+        if not interactive and goal is not None and goal.outcome in {
+            "incomplete",
+            "needs_input",
+            "cancelled",
+        }:
+            logger.info("Scan %s ended with goal outcome=%s", scan_id, goal.outcome)
+            _finalize_partial_report(goal)
         if not interactive and result is not None:
             final = getattr(result, "final_output", None)
             scan_completed = False
@@ -339,6 +427,11 @@ async def run_kael_scan(
         for s in sessions_to_close:
             with contextlib.suppress(Exception):
                 s.close()
+        with contextlib.suppress(Exception):
+            # Persist this segment's active wall-time before snapshotting so
+            # resume preserves consumed budget (plan §56).
+            if coordinator.goal is not None:
+                coordinator.goal.budget.fold_segment()
         with contextlib.suppress(Exception):
             # Coordinator snapshot writes are debounced; on teardown
             # we want a guaranteed fresh copy of the final state.

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from agents.memory import Session
 
     from kael.config.settings import Settings
+    from kael.core.goals import GoalState
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,9 @@ class AgentCoordinator:
         self.run_config: RunConfig | None = None
         self.model_uses_chat_completions: bool | None = None
         self.model_api_base: str | None = None
+        # Host-owned goal state (budget, criteria, verdicts, outcome).
+        # None until the runner attaches one; inert unless configured.
+        self.goal: GoalState | None = None
         # Invoked synchronously after every graph mutation (the TUI uses it
         # to pull a fresh snapshot instead of polling).
         self.on_change: Callable[[], None] | None = None
@@ -314,6 +318,56 @@ class AgentCoordinator:
             if runtime.stream is stream:
                 runtime.stream = None
 
+    async def consume_goal_model_call(self) -> bool:
+        """Atomically count one model call against the goal budget.
+
+        Returns False only when a configured cap would be exceeded.
+        Counting under the lock *is* the reservation, so concurrent root
+        and child calls cannot collectively overrun the cap.
+        """
+        async with self._lock:
+            goal = self.goal
+            if goal is None or not goal.budget.configured():
+                return True
+            return goal.budget.try_consume_model_call()
+
+    async def consume_goal_tool_call(self) -> bool:
+        async with self._lock:
+            goal = self.goal
+            if goal is None or not goal.budget.configured():
+                return True
+            return goal.budget.try_consume_tool_call()
+
+    async def goal_budget_exhausted(self) -> bool:
+        async with self._lock:
+            goal = self.goal
+            return goal is not None and goal.budget.configured() and goal.budget.exhausted()
+
+    async def mark_goal_stop(self, outcome: str, stop_reason: str) -> None:
+        """Record a terminal/partial outcome once (first writer wins)."""
+        async with self._lock:
+            goal = self.goal
+            if goal is None or goal.outcome != "in_progress":
+                return
+            goal.outcome = outcome  # type: ignore[assignment]
+            goal.stop_reason = stop_reason  # type: ignore[assignment]
+        logger.info("goal.stop outcome=%s reason=%s", outcome, stop_reason)
+        await self._maybe_snapshot()
+
+    async def record_goal_verdict(self, criterion_id: str, submission: dict[str, Any]) -> Any:
+        """Run the host check for one criterion and persist the verdict.
+
+        The verdict is written under the lock and snapshotted so it
+        survives resume and gates ``finish_scan`` even across a restart.
+        """
+        async with self._lock:
+            goal = self.goal
+            if goal is None:
+                return None
+            verdict = goal.verify(criterion_id, submission)
+        await self._maybe_snapshot()
+        return verdict
+
     async def active_agents_except(self, agent_id: str) -> list[dict[str, Any]]:
         async with self._lock:
             return [
@@ -363,21 +417,29 @@ class AgentCoordinator:
 
     async def snapshot(self) -> dict[str, Any]:
         async with self._lock:
-            return {
+            snap: dict[str, Any] = {
                 "statuses": dict(self.statuses),
                 "parent_of": dict(self.parent_of),
                 "names": dict(self.names),
                 "metadata": {aid: dict(md) for aid, md in self.metadata.items()},
                 "pending_counts": dict(self.pending_counts),
             }
+            if self.goal is not None:
+                snap["goal"] = self.goal.to_dict()
+            return snap
 
     async def restore(self, snap: dict[str, Any]) -> None:
+        from kael.core.goals import GoalState
+
         async with self._lock:
             self.statuses = dict(snap.get("statuses", {}))
             self.parent_of = dict(snap.get("parent_of", {}))
             self.names = dict(snap.get("names", {}))
             self.metadata = {aid: dict(md) for aid, md in snap.get("metadata", {}).items()}
             self.pending_counts = dict(snap.get("pending_counts", {}))
+            if "goal" in snap:
+                # Resume preserves consumed budget and recorded verdicts (plan §56).
+                self.goal = GoalState.from_dict(snap["goal"])
             for aid in self.statuses:
                 self.runtimes.setdefault(aid, AgentRuntime())
 

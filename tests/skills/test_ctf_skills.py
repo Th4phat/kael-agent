@@ -194,7 +194,7 @@ class TestCTFToolsRegistration:
     """The ctf_tools package must be wired into the ctf scan mode."""
 
     def test_all_ctf_tools_importable(self) -> None:
-        assert len(ALL_CTF_TOOLS) == 6
+        assert len(ALL_CTF_TOOLS) == 7
 
     def test_ctf_scan_mode_includes_ctf_tools(self) -> None:
         tools = get_base_tools(scan_mode="ctf")

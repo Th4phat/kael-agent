@@ -646,6 +646,10 @@ async def agent_finish(
             "summary": result_summary,
             "findings_count": len(findings or []),
             "has_recommendations": bool(final_recommendations),
+            # Clean termination and task success are separate (plan §17): the
+            # runtime completes either way, but a success=False assignment is
+            # reported incomplete so the parent doesn't treat it as achieved.
+            "goal_outcome": "achieved" if success else "incomplete",
         },
         ensure_ascii=False,
         default=str,

@@ -18,6 +18,7 @@ from docker import errors as docker_errors  # type: ignore[import-untyped, unuse
 from openai import APIConnectionError, APIError, APITimeoutError
 
 from kael.agents.factory import RepeatedInvalidToolArguments
+from kael.core.goals import GoalBudgetExhausted
 from kael.core.inputs import child_initial_input
 from kael.core.sessions import open_agent_session, strip_all_images_from_session
 
@@ -70,6 +71,22 @@ _INVALID_FINAL_OUTPUT_LIMIT = 5
 _MODEL_BEHAVIOR_RETRY_LIMIT = 1
 
 _MISSING_TOOL_RE = re.compile(r"^Tool\s+(?P<name>\S+)\s+not found in agent\s+\S+", re.IGNORECASE)
+
+
+def _as_goal_policy_stop(exc: BaseException) -> GoalBudgetExhausted | None:
+    """Find a goal policy-stop anywhere in the exception chain.
+
+    The SDK may wrap a hook exception, so check ``__cause__`` /
+    ``__context__`` as well as the exception itself.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, GoalBudgetExhausted):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _is_cli_tool_hallucination(exc: BaseException) -> str | None:
@@ -473,6 +490,19 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             finally:
                 await coordinator.detach_stream(agent_id, stream)
         except Exception as exc:
+            policy_stop = _as_goal_policy_stop(exc)
+            if policy_stop is not None:
+                # A host budget gate tripped. This is an expected terminal
+                # outcome, not an error: park the agent cleanly with a
+                # partial result and never retry it (plan §96).
+                logger.info(
+                    "agent %s stopped by goal policy (%s); parking as stopped",
+                    agent_id,
+                    policy_stop.reason,
+                )
+                await coordinator.mark_goal_stop("incomplete", policy_stop.reason)
+                await coordinator.set_status(agent_id, "stopped")
+                return None
             if network_retries < _NETWORK_RETRY_LIMIT and isinstance(
                 exc, _TRANSIENT_NETWORK_EXCEPTIONS
             ):

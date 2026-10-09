@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from agents.lifecycle import RunHooks
 
+from kael.core.goals import GoalBudgetExhausted
 from kael.report.state import get_global_report_state
 
 
@@ -18,8 +19,19 @@ if TYPE_CHECKING:
     from agents.agent import Agent
     from agents.items import ModelResponse, TResponseInputItem
 
+    from kael.core.agents import AgentCoordinator
+
 
 logger = logging.getLogger(__name__)
+
+
+def _coordinator_from(context: Any) -> AgentCoordinator | None:
+    inner = getattr(context, "context", None)
+    if not isinstance(inner, dict):
+        return None
+    from kael.core.agents import coordinator_from_context
+
+    return coordinator_from_context(inner)
 
 
 class ReportUsageHooks(RunHooks[dict[str, Any]]):
@@ -36,8 +48,14 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         system_prompt: str | None,
         input_items: list[TResponseInputItem],
     ) -> None:
-        ctx = context.context if isinstance(context.context, dict) else {}
-        coordinator = ctx.get("coordinator")
+        # Pre-dispatch budget gate (plan §84): count this model call against
+        # the shared goal budget before the request leaves. A configured cap
+        # that is already spent raises a policy stop that _run_cycle parks
+        # cleanly — it is never retried as a transport error.
+        coordinator = _coordinator_from(context)
+        if coordinator is not None and not await coordinator.consume_goal_model_call():
+            raise GoalBudgetExhausted("budget_exhausted")
+
         config = getattr(coordinator, "run_config", None)
         model = getattr(config, "model", None)
         self._request_models[id(context)] = model if isinstance(model, str) else self._model
@@ -113,6 +131,13 @@ class ToolTelemetryHooks(RunHooks[dict[str, Any]]):
         agent: Agent[dict[str, Any]],  # noqa: ARG002 - SDK-required signature
         tool: Any,
     ) -> None:
+        # Tool-call budget gate (plan §84). The SDK awaits start hooks before
+        # local/shell tool execution, so raising here stops the tool from
+        # running. Inert unless a goal tool-call cap is configured.
+        coordinator = _coordinator_from(context)
+        if coordinator is not None and not await coordinator.consume_goal_tool_call():
+            raise GoalBudgetExhausted("budget_exhausted")
+
         tool_name = getattr(tool, "name", None) or "<unknown>"
         tool_call_id = getattr(context, "tool_call_id", "") or ""
         arguments = getattr(context, "tool_arguments", None)

@@ -19,6 +19,7 @@ from .cyberchef_decode import cyberchef_decode
 from .format_string_offset import format_string_offset
 from .pwn_template import pwn_template
 from .rsa_attack_detect import rsa_attack_detect
+from .submit_flag import submit_flag
 from .xor_bruteforce import xor_bruteforce
 
 
@@ -29,6 +30,7 @@ ALL_CTF_TOOLS = [
     pwn_template,
     binary_checksec,
     format_string_offset,
+    submit_flag,
 ]
 
 
@@ -39,5 +41,6 @@ __all__ = [
     "format_string_offset",
     "pwn_template",
     "rsa_attack_detect",
+    "submit_flag",
     "xor_bruteforce",
 ]

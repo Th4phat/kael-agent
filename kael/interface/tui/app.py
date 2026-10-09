@@ -1071,6 +1071,9 @@ class KaelTUIApp(App):  # type: ignore[misc]
         self.query_one("#chat_input_container", Horizontal).border_title = name
 
     def _tick(self) -> None:
+        # The interval can still fire while shutdown is removing widgets.
+        if not self.is_running:
+            return
         self._tick_count += 1
         self._update_elapsed()
         self._update_stats_display()

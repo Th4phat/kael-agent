@@ -284,3 +284,9 @@ class TestInputAndKeys:
             assert isinstance(app.query_one("#welcome"), Markdown)
             assert app.query_one("#agents_tree").border_title == "agents"
             assert isinstance(app.query_one("#stats_display"), Static)
+
+    async def test_tick_after_shutdown_is_noop(self, app: KaelTUIApp) -> None:
+        # The 1s interval can fire while teardown is removing widgets.
+        async with app.run_test(size=(120, 40)):
+            pass
+        app._tick()

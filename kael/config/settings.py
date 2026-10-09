@@ -309,6 +309,27 @@ class ToolHarnessSettings(_KaelBaseSettings):
     )
 
 
+class GoalSettings(_KaelBaseSettings):
+    """Goal-wide hard limits, shared across root, children, recovery, and
+    the verifier (see ``kael.core.goals``). All default to ``None`` =
+    unlimited, so the goal budget is strictly opt-in and a scan without
+    these set behaves as before. ``max_turns`` remains a separate
+    per-invocation SDK guard.
+    """
+
+    model_config = _BASE_CONFIG
+
+    max_model_calls: int | None = Field(default=None, alias="KAEL_GOAL_MAX_MODEL_CALLS", gt=0)
+    max_tool_calls: int | None = Field(default=None, alias="KAEL_GOAL_MAX_TOOL_CALLS", gt=0)
+    max_wall_seconds: int | None = Field(default=None, alias="KAEL_GOAL_MAX_WALL_SECONDS", gt=0)
+    watchdog_poll_seconds: float = Field(
+        default=5.0,
+        alias="KAEL_GOAL_WATCHDOG_POLL_SECONDS",
+        gt=0,
+        description="How often the wall-clock/budget watchdog checks the goal budget.",
+    )
+
+
 class Settings(_KaelBaseSettings):
     model_config = _BASE_CONFIG
 
@@ -320,3 +341,4 @@ class Settings(_KaelBaseSettings):
         default_factory=ReverseEngineeringSettings
     )
     tool_harness: ToolHarnessSettings = Field(default_factory=ToolHarnessSettings)
+    goal: GoalSettings = Field(default_factory=GoalSettings)

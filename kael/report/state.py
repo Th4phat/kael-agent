@@ -266,21 +266,50 @@ class ReportState:
         methodology: str,
         technical_analysis: str,
         recommendations: str,
+        *,
+        scan_completed: bool = True,
+        success: bool = True,
+        goal_outcome: str = "achieved",
+        stop_reason: str = "",
     ) -> None:
         self.scan_results = {
-            "scan_completed": True,
+            "scan_completed": scan_completed,
             "executive_summary": executive_summary.strip(),
             "methodology": methodology.strip(),
             "technical_analysis": technical_analysis.strip(),
             "recommendations": recommendations.strip(),
-            "success": True,
+            "success": success,
+            "goal_outcome": goal_outcome,
+            "stop_reason": stop_reason,
         }
 
         self.final_scan_result = self._format_final_scan_result(self.scan_results)
         self.run_record["scan_results"] = self.scan_results
 
-        logger.info("Updated scan final fields")
-        self.save_run_data(mark_complete=True)
+        logger.info("Updated scan final fields (completed=%s, outcome=%s)", scan_completed, goal_outcome)
+        if scan_completed:
+            self.save_run_data(mark_complete=True)
+        else:
+            self.save_run_data(status="stopped")
+
+    def finalize_partial_report(
+        self,
+        *,
+        goal_outcome: str,
+        stop_reason: str,
+        summary: str,
+    ) -> None:
+        """Host-written partial report when a run stops without verified completion."""
+        self.update_scan_final_fields(
+            executive_summary=summary,
+            methodology="Run stopped before completion; see the summary above.",
+            technical_analysis="Partial result — the run did not reach verified completion.",
+            recommendations="Resume the scan to continue, or raise the configured budget.",
+            scan_completed=False,
+            success=False,
+            goal_outcome=goal_outcome,
+            stop_reason=stop_reason,
+        )
 
     def set_scan_config(self, config: dict[str, Any]) -> None:
         self.scan_config = config
