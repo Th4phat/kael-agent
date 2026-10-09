@@ -145,6 +145,18 @@ Agent scope does not import their contents into private agent stores.
 An existing explicit `session` or `target` setting remains a sharing choice;
 select `agent` to turn sharing off for the next run.
 
+## Goal budget
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `KAEL_GOAL_MAX_MODEL_CALLS` | — | Maximum model calls for the whole goal |
+| `KAEL_GOAL_MAX_TOOL_CALLS` | — | Maximum tool calls for the whole goal |
+| `KAEL_GOAL_MAX_WALL_SECONDS` | — | Maximum wall-clock time for the whole goal, in seconds |
+| `KAEL_GOAL_WATCHDOG_POLL_SECONDS` | `5` | How often the watchdog checks the goal budget, in seconds |
+
+The limits are shared by the root agent, child agents, recovery, and the
+verifier. Each is unlimited when unset, so the budget is opt-in.
+
 ## Malware reverse engineering
 
 | Variable | Default | Purpose |
